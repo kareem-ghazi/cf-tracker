@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+
+{% block title %}Spreadsheets - CF Tracker{% endblock %}
+{% block header %}📋 Spreadsheets{% endblock %}
+
+{% block header_actions %}
+<button class="btn btn-primary" onclick="openAddSpreadsheetModal()">📤 Upload Spreadsheet</button>
+{% endblock %}
+
+{% block content %}
+<div class="spreadsheets-container">
+    <div class="spreadsheets-list" id="spreadsheetsList">
+        <div class="loading-spinner">Loading spreadsheets...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let spreadsheets = [];
+
+    document.addEventListener('DOMContentLoaded', loadSpreadsheets);
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    async function loadSpreadsheets() {
+        const container = document.getElementById('spreadsheetsList');
+
+        try {
+            const response = await fetch('/api/spreadsheets');
+            spreadsheets = await response.json();
+
+            if (spreadsheets.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon">📋</div>
+                        <h3>No Spreadsheets Yet</h3>
+                        <p>Upload a CSV file to store participant training data.</p>
+                        <button class="btn btn-primary" onclick="openAddSpreadsheetModal()">📤 Upload Spreadsheet</button>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = spreadsheets.map(s => `
+                <div class="card spreadsheet-card">
+                    <div class="card-header">
+                        <h3>${escapeHtml(s.name)}</h3>
+                        <div class="card-actions">
+                            <button class="btn btn-ghost btn-sm" onclick="viewSpreadsheet(${s.id})" title="View Data">👁️</button>
+                            <button class="btn btn-ghost btn-sm" onclick="openEditSpreadsheetModal(${s.id})" title="Edit">✏️</button>
+                            <button class="btn btn-ghost btn-sm btn-danger" onclick="deleteSpreadsheet(${s.id})" title="Delete">🗑️</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="spreadsheet-info">
+                            <div class="info-row">
+                                <span class="info-label">File:</span>
+                                <span class="info-value">${escapeHtml(s.filename || 'Unknown')}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Columns:</span>
+                                <span class="info-value">${s.columns ? s.columns.length : 0}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Rows:</span>
+                                <span class="info-value">${s.row_count || 0}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Handle Column:</span>
+                                <span class="info-value">${escapeHtml(s.handle_column)}</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Linked Groups:</span>
+                                <span class="info-value">${s.group_count}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+
+        } catch (error) {
+            console.error('Error loading spreadsheets:', error);
+            container.innerHTML = '<div class="error-state">Failed to load spreadsheets</div>';
+        }
+    }
+
+    function openAddSpreadsheetModal() {
+        openModal('Upload Spreadsheet', `
+            <form id="addSpreadsheetForm" onsubmit="submitAddSpreadsheet(event)">
+                <div class="form-group">
+                    <label for="spreadsheetFile">CSV File</label>
+                    <input type="file" id="spreadsheetFile" name="file" accept=".csv" required>
+                    <small class="form-hint">Upload a CSV file with participant data</small>
+                </div>
+                <div class="form-group">
+                    <label for="spreadsheetName">Spreadsheet Name</label>
+                    <input type="text" id="spreadsheetName" name="name" placeholder="e.g., Training Batch 1">
+                    <small class="form-hint">Leave empty to use filename</small>
+                </div>
+                <div class="form-group">
+                    <label for="handleColumn">Handle Column Name</label>
+                    <input type="text" id="handleColumn" name="handle_column" value="Codeforces Handle" required>
+                    <small class="form-hint">The column header that contains Codeforces handles</small>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Upload</button>
+                </div>
+            </form>
+        `);
+    }
+
+    async function submitAddSpreadsheet(event) {
+        event.preventDefault();
+
+        const file = document.getElementById('spreadsheetFile').files[0];
+        const name = document.getElementById('spreadsheetName').value;
+        const handleColumn = document.getElementById('handleColumn').value;
+
+        const formData = new FormData();
+        formData.append('file', file);
+        if (name) formData.append('name', name);
+        formData.append('handle_column', handleColumn);
+
+        try {
+            const response = await fetch('/api/spreadsheets', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (response.ok) {
+                closeModal();
+                showToast('Spreadsheet uploaded successfully!', 'success');
+                loadSpreadsheets();
+            } else {
+                const data = await response.json();
+                showToast(data.error || 'Failed to upload spreadsheet', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to upload spreadsheet', 'error');
+        }
+    }
+
+    async function viewSpreadsheet(id) {
+        try {
+            const response = await fetch(`/api/spreadsheets/${id}/data`);
+            const data = await response.json();
+
+            let tableHtml = '<div class="spreadsheet-preview"><table class="data-table"><thead><tr>';
+            for (const col of data.columns) {
+                tableHtml += `<th>${escapeHtml(col)}</th>`;
+            }
+            tableHtml += '</tr></thead><tbody>';
+
+            const maxRows = Math.min(data.rows.length, 50);
+            for (let i = 0; i < maxRows; i++) {
+                tableHtml += '<tr>';
+                for (const col of data.columns) {
+                    tableHtml += `<td>${escapeHtml(data.rows[i][col] || '')}</td>`;
+                }
+                tableHtml += '</tr>';
+            }
+            tableHtml += '</tbody></table>';
+            if (data.rows.length > 50) {
+                tableHtml += `<p class="hint">Showing first 50 of ${data.rows.length} rows</p>`;
+            }
+            tableHtml += '</div>';
+
+            openModal(`Spreadsheet: ${data.name}`, tableHtml);
+
+        } catch (error) {
+            showToast('Failed to load spreadsheet data', 'error');
+        }
+    }
+
+    function openEditSpreadsheetModal(id) {
+        const spreadsheet = spreadsheets.find(s => s.id === id);
+        if (!spreadsheet) return;
+
+        openModal('Edit Spreadsheet', `
+            <form id="editSpreadsheetForm" onsubmit="submitEditSpreadsheet(event, ${id})">
+                <div class="form-group">
+                    <label for="editSpreadsheetName">Spreadsheet Name</label>
+                    <input type="text" id="editSpreadsheetName" name="name" value="${escapeHtml(spreadsheet.name)}" required>
+                </div>
+                <div class="form-group">
+                    <label for="editHandleColumn">Handle Column Name</label>
+                    <input type="text" id="editHandleColumn" name="handle_column" value="${escapeHtml(spreadsheet.handle_column)}" required>
+                </div>
+                <div class="form-group">
+                    <label for="editSpreadsheetFile">Replace CSV File (optional)</label>
+                    <input type="file" id="editSpreadsheetFile" name="file" accept=".csv">
+                    <small class="form-hint">Leave empty to keep current data</small>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        `);
+    }
+
+    async function submitEditSpreadsheet(event, id) {
+        event.preventDefault();
+
+        const name = document.getElementById('editSpreadsheetName').value;
+        const handleColumn = document.getElementById('editHandleColumn').value;
+        const file = document.getElementById('editSpreadsheetFile').files[0];
+
+        let response;
+        if (file) {
+            // File upload
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('handle_column', handleColumn);
+
+            response = await fetch(`/api/spreadsheets/${id}`, {
+                method: 'PUT',
+                body: formData
+            });
+        } else {
+            // JSON update
+            response = await fetch(`/api/spreadsheets/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, handle_column: handleColumn })
+            });
+        }
+
+        try {
+            if (response.ok) {
+                closeModal();
+                showToast('Spreadsheet updated successfully!', 'success');
+                loadSpreadsheets();
+            } else {
+                const data = await response.json();
+                showToast(data.error || 'Failed to update spreadsheet', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to update spreadsheet', 'error');
+        }
+    }
+
+    async function deleteSpreadsheet(id) {
+        if (!confirm('Are you sure you want to delete this spreadsheet? Linked groups will be unlinked.')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/spreadsheets/${id}`, { method: 'DELETE' });
+
+            if (response.ok) {
+                showToast('Spreadsheet deleted', 'success');
+                loadSpreadsheets();
+            } else {
+                showToast('Failed to delete spreadsheet', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to delete spreadsheet', 'error');
+        }
+    }
+</script>
+{% endblock %}

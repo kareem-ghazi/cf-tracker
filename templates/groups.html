@@ -1,0 +1,953 @@
+{% extends 'base.html' %}
+
+{% block title %}Groups - CF Tracker{% endblock %}
+{% block header %}Training Groups{% endblock %}
+
+{% block header_actions %}
+<button class="btn btn-primary" onclick="openCreateGroupModal()">
+    <span>➕</span> New Group
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="groups-page">
+    <!-- Groups List -->
+    <div class="groups-container" id="groupsContainer">
+        <div class="loading-spinner">Loading groups...</div>
+    </div>
+
+    <!-- Group Detail Panel (shown when a group is selected) -->
+    <div class="group-detail-panel" id="groupDetailPanel" style="display: none;">
+        <div class="panel-header">
+            <button class="btn btn-back" onclick="closeGroupDetail()">← Back</button>
+            <div class="panel-title-row">
+                <h2 id="groupDetailName">Group Name</h2>
+                <button class="btn btn-sm btn-ghost" onclick="openEditGroupModal()">✏️</button>
+            </div>
+            <div class="panel-actions">
+                <!-- Participants Group -->
+                <div class="btn-group">
+                    <button class="btn btn-secondary btn-sm" onclick="openDefaultParticipantsModal()">👥
+                        Participants</button>
+                    <button class="btn btn-warning btn-sm" onclick="applyParticipantsToAll()">📤 Apply</button>
+                </div>
+                <!-- Contests Group -->
+                <div class="btn-group">
+                    <button class="btn btn-primary btn-sm" onclick="openAddContestModal()">➕ Add</button>
+                    <button class="btn btn-info btn-sm" onclick="openBatchAddModal()">📦 Batch</button>
+                </div>
+                <!-- Danger -->
+                <button class="btn btn-danger btn-sm" onclick="confirmDeleteGroup()">🗑️</button>
+            </div>
+        </div>
+        <p class="group-description" id="groupDetailDescription"></p>
+
+        <!-- View Tabs -->
+        <div class="view-tabs" style="margin-bottom: 1rem;">
+            <button class="tab-btn active" onclick="switchGroupView('contests')" id="tabContests">🏆 Contests</button>
+            <button class="tab-btn" onclick="switchGroupView('overview')" id="tabOverview">📊 Overview</button>
+        </div>
+
+        <!-- Contests View -->
+        <div class="contests-list" id="contestsList">
+            <div class="loading-spinner">Loading contests...</div>
+        </div>
+
+        <!-- Overview View -->
+        <div class="overview-container" id="overviewContainer" style="display: none;">
+            <div class="loading-spinner">Loading overview...</div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentGroupId = null;
+    let currentGroup = null;
+
+    document.addEventListener('DOMContentLoaded', function () {
+        loadGroups();
+
+        // Check if we should open a specific group
+        const params = new URLSearchParams(window.location.search);
+        const groupId = params.get('group');
+        if (groupId) {
+            setTimeout(() => openGroupDetail(parseInt(groupId)), 500);
+        }
+    });
+
+    function formatDate(dateString) {
+        if (!dateString) return 'Unknown';
+        const date = new Date(dateString);
+        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    function formatRelativeTime(dateString) {
+        if (!dateString) return 'Never';
+        const date = new Date(dateString);
+        const now = new Date();
+        const diffMs = now - date;
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMs / 3600000);
+        const diffDays = Math.floor(diffMs / 86400000);
+
+        if (diffMins < 1) return 'Just now';
+        if (diffMins < 60) return `${diffMins}m ago`;
+        if (diffHours < 24) return `${diffHours}h ago`;
+        if (diffDays < 7) return `${diffDays}d ago`;
+        return formatDate(dateString);
+    }
+
+    async function loadGroups() {
+        const container = document.getElementById('groupsContainer');
+
+        try {
+            const response = await fetch('/api/groups');
+            const groups = await response.json();
+
+            if (groups.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon">👥</div>
+                        <h3>No Training Groups Yet</h3>
+                        <p>Create your first training group to start tracking contests.</p>
+                        <button class="btn btn-primary" onclick="openCreateGroupModal()">Create Group</button>
+                    </div>
+                `;
+            } else {
+                container.innerHTML = `
+                    <div class="groups-grid">
+                        ${groups.map(group => `
+                            <div class="group-card" onclick="openGroupDetail(${group.id})">
+                                <div class="group-card-header">
+                                    <h3>${escapeHtml(group.name)}</h3>
+                                    <span class="badge">${group.contest_count} contests</span>
+                                </div>
+                                <p class="group-card-description">${escapeHtml(group.description) || 'No description'}</p>
+                                <div class="group-card-footer">
+                                    <span class="group-date">Created ${formatDate(group.created_at)}</span>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+        } catch (error) {
+            console.error('Error loading groups:', error);
+            container.innerHTML = '<div class="error-state">Failed to load groups</div>';
+        }
+    }
+
+    async function openGroupDetail(groupId) {
+        currentGroupId = groupId;
+
+        // Hide groups container, show detail panel
+        document.getElementById('groupsContainer').style.display = 'none';
+        document.getElementById('groupDetailPanel').style.display = 'block';
+
+        // Load group details
+        try {
+            const groupResponse = await fetch(`/api/groups/${groupId}`);
+            currentGroup = await groupResponse.json();
+
+            document.getElementById('groupDetailName').textContent = currentGroup.name;
+            document.getElementById('groupDetailDescription').textContent = currentGroup.description || '';
+
+            // Load contests
+            loadGroupContests(groupId);
+        } catch (error) {
+            showToast('Failed to load group details', 'error');
+        }
+    }
+
+    async function loadGroupContests(groupId) {
+        const container = document.getElementById('contestsList');
+
+        try {
+            const response = await fetch(`/api/groups/${groupId}/contests`);
+            const contests = await response.json();
+
+            if (contests.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state small">
+                        <div class="empty-icon">🏆</div>
+                        <h4>No Contests Added</h4>
+                        <p>Add a Codeforces contest to start tracking participants.</p>
+                        <button class="btn btn-primary btn-sm" onclick="openAddContestModal()">Add Contest</button>
+                    </div>
+                `;
+            } else {
+                container.innerHTML = `
+                    <div class="contests-grid">
+                        ${contests.map(contest => `
+                            <div class="contest-card">
+                                <div class="contest-card-header">
+                                    <h4>${escapeHtml(contest.name)}</h4>
+                                    <span class="badge badge-info">CF #${contest.cf_contest_id}</span>
+                                    ${contest.start_date ? `<span class="badge">${formatDate(contest.start_date)}</span>` : ''}
+                                </div>
+                                <div class="contest-card-stats">
+                                    <div class="stat">
+                                        <span class="stat-label">Required</span>
+                                        <span class="stat-value">${contest.min_solved_is_percent ? contest.min_solved + '%' : contest.required_solved + ' problems'}</span>
+                                    </div>
+                                    <div class="stat">
+                                        <span class="stat-label">Participants</span>
+                                        <span class="stat-value">${contest.participants.length}</span>
+                                    </div>
+                                    <div class="stat">
+                                        <span class="stat-label">Last Refreshed</span>
+                                        <span class="stat-value">${contest.last_refreshed ? formatRelativeTime(contest.last_refreshed) : 'Never'}</span>
+                                    </div>
+                                </div>
+                                <div class="contest-card-actions">
+                                    <a href="/contest/${contest.id}" class="btn btn-primary btn-sm">View</a>
+                                    <button class="btn btn-success btn-sm" onclick="quickRefresh(${contest.id}, event)" title="Quick Refresh">🔄</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="openEditContestModal(${contest.id})">Edit</button>
+                                    <button class="btn btn-danger btn-sm" onclick="confirmDeleteContest(${contest.id})">🗑️</button>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+        } catch (error) {
+            console.error('Error loading contests:', error);
+            container.innerHTML = '<div class="error-state">Failed to load contests</div>';
+        }
+    }
+
+    function closeGroupDetail() {
+        currentGroupId = null;
+        currentGroup = null;
+        document.getElementById('groupDetailPanel').style.display = 'none';
+        document.getElementById('groupsContainer').style.display = 'block';
+
+        // Clear URL parameter
+        window.history.pushState({}, '', '/groups');
+    }
+
+    function openCreateGroupModal() {
+        openModal('Create New Group', `
+            <form id="createGroupForm" onsubmit="submitCreateGroup(event)">
+                <div class="form-group">
+                    <label for="groupName">Group Name</label>
+                    <input type="text" id="groupName" name="name" required placeholder="e.g., Fall 2024 Training">
+                </div>
+                <div class="form-group">
+                    <label for="groupDescription">Description (optional)</label>
+                    <textarea id="groupDescription" name="description" rows="3" placeholder="Describe this training group..."></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Create Group</button>
+                </div>
+            </form>
+        `);
+    }
+
+    async function submitCreateGroup(event) {
+        event.preventDefault();
+        const name = document.getElementById('groupName').value;
+        const description = document.getElementById('groupDescription').value;
+
+        try {
+            const response = await fetch('/api/groups', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, description })
+            });
+
+            if (response.ok) {
+                closeModal();
+                showToast('Group created successfully!', 'success');
+                loadGroups();
+            } else {
+                const data = await response.json();
+                showToast(data.error || 'Failed to create group', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to create group', 'error');
+        }
+    }
+
+    function openAddContestModal() {
+        openModal('Add Contest', `
+            <form id="addContestForm" onsubmit="submitAddContest(event)">
+                <div class="form-group">
+                    <label for="contestId">Codeforces Contest ID</label>
+                    <input type="number" id="contestId" name="cf_contest_id" required placeholder="e.g., 1950">
+                    <small class="form-hint">Find this in the contest URL: codeforces.com/contest/<strong>1950</strong></small>
+                </div>
+                <div class="form-group">
+                    <label for="contestName">Custom Name (optional)</label>
+                    <input type="text" id="contestName" name="name" placeholder="Leave empty to auto-fetch">
+                </div>
+                <div class="form-group">
+                    <label for="minSolved">Minimum to Pass</label>
+                    <div class="input-with-toggle">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="noMinimum" onchange="toggleMinimum()">
+                            No Minimum Requirement
+                        </label>
+                    </div>
+                    <div id="minimumInputs">
+                        <div class="input-with-toggle">
+                            <input type="number" id="minSolved" name="min_solved" value="1" min="0">
+                            <label class="toggle-label">
+                                <input type="checkbox" id="minSolvedIsPercent" name="min_solved_is_percent">
+                                <span>Use percentage (%)</span>
+                            </label>
+                        </div>
+                    </div>
+                    <small class="form-hint">Set absolute number or percentage of total problems</small>
+                </div>
+                <div class="form-group">
+                    <label for="participants">Participants (Codeforces handles)</label>
+                    <textarea id="participants" name="participants" rows="3" placeholder="Leave empty to auto-fetch all contest participants"></textarea>
+                    <small class="form-hint">💡 Leave empty to automatically import all participants from the contest</small>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add Contest</button>
+                </div>
+            </form>
+        `);
+    }
+
+    async function submitAddContest(event) {
+        event.preventDefault();
+        const cfContestId = parseInt(document.getElementById('contestId').value);
+        const name = document.getElementById('contestName').value;
+        const noMinimum = document.getElementById('noMinimum').checked;
+        const minSolved = noMinimum ? 0 : parseInt(document.getElementById('minSolved').value);
+        const minSolvedIsPercent = noMinimum ? false : document.getElementById('minSolvedIsPercent').checked;
+        const participantsRaw = document.getElementById('participants').value;
+
+        // Parse participants (handle newlines and commas)
+        const participants = participantsRaw
+            .split(/[\n,]+/)
+            .map(h => h.trim())
+            .filter(h => h.length > 0);
+
+        showToast('Adding contest... This may take a moment.', 'info');
+
+        try {
+            const response = await fetch(`/api/groups/${currentGroupId}/contests`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    cf_contest_id: cfContestId,
+                    name: name || undefined,
+                    min_solved: minSolved,
+                    min_solved_is_percent: minSolvedIsPercent,
+                    participants: participants.length > 0 ? participants : undefined
+                })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                closeModal();
+                showToast(`Contest added with ${data.participants.length} participants!`, 'success');
+                loadGroupContests(currentGroupId);
+            } else {
+                const data = await response.json();
+                showToast(data.error || 'Failed to add contest', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to add contest', 'error');
+        }
+    }
+
+    async function openEditContestModal(contestId) {
+        try {
+            const response = await fetch(`/api/contests/${contestId}`);
+            const contest = await response.json();
+
+            openModal('Edit Contest', `
+                <form id="editContestForm" onsubmit="submitEditContest(event, ${contestId})">
+                    <div class="form-group">
+                        <label for="editContestName">Contest Name</label>
+                        <input type="text" id="editContestName" name="name" value="${escapeHtml(contest.name)}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="editMinSolved">Minimum to Pass</label>
+                        <div class="input-with-toggle">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="editNoMinimum" onchange="toggleMinimum('edit')" ${contest.min_solved === 0 ? 'checked' : ''}>
+                                No Minimum Requirement
+                            </label>
+                        </div>
+                        <div id="editMinimumInputs" ${contest.min_solved === 0 ? 'style="display:none;"' : ''}>
+                            <div class="input-with-toggle">
+                                <input type="number" id="editMinSolved" name="min_solved" value="${contest.min_solved}" min="0">
+                                <label class="toggle-label">
+                                    <input type="checkbox" id="editMinSolvedIsPercent" name="min_solved_is_percent" ${contest.min_solved_is_percent ? 'checked' : ''}>
+                                    <span>Use percentage (%)</span>
+                                </label>
+                            </div>
+                        </div>
+                        <small class="form-hint">Total problems: ${contest.total_problems || 'Unknown'}</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="editParticipants">Participants (${contest.participants.length} handles)</label>
+                        <textarea id="editParticipants" name="participants" rows="6">${contest.participants.join('\n')}</textarea>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save Changes</button>
+                    </div>
+                </form>
+            `);
+        } catch (error) {
+            showToast('Failed to load contest details', 'error');
+        }
+    }
+
+    async function submitEditContest(event, contestId) {
+        event.preventDefault();
+        const name = document.getElementById('editContestName').value;
+        const noMinimum = document.getElementById('editNoMinimum').checked;
+        const minSolved = noMinimum ? 0 : parseInt(document.getElementById('editMinSolved').value);
+        const minSolvedIsPercent = noMinimum ? false : document.getElementById('editMinSolvedIsPercent').checked;
+        const participantsRaw = document.getElementById('editParticipants').value;
+
+        const participants = participantsRaw
+            .split(/[\n,]+/)
+            .map(h => h.trim())
+            .filter(h => h.length > 0);
+
+        try {
+            const response = await fetch(`/api/contests/${contestId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, min_solved: minSolved, min_solved_is_percent: minSolvedIsPercent, participants })
+            });
+
+            if (response.ok) {
+                closeModal();
+                showToast('Contest updated successfully!', 'success');
+                loadGroupContests(currentGroupId);
+            } else {
+                const data = await response.json();
+                showToast(data.error || 'Failed to update contest', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to update contest', 'error');
+        }
+    }
+
+    function toggleMinimum(prefix = '') {
+        const checkbox = document.getElementById(prefix ? `${prefix}NoMinimum` : 'noMinimum');
+        const inputsDiv = document.getElementById(prefix ? `${prefix}MinimumInputs` : 'minimumInputs');
+        if (inputsDiv) {
+            inputsDiv.style.display = checkbox.checked ? 'none' : 'block';
+        }
+    }
+
+    function confirmDeleteGroup() {
+        if (confirm(`Are you sure you want to delete "${currentGroup.name}"? This will also delete all contests in this group.`)) {
+            deleteGroup(currentGroupId);
+        }
+    }
+
+    async function deleteGroup(groupId) {
+        try {
+            const response = await fetch(`/api/groups/${groupId}`, { method: 'DELETE' });
+
+            if (response.ok) {
+                showToast('Group deleted successfully!', 'success');
+                closeGroupDetail();
+                loadGroups();
+            } else {
+                showToast('Failed to delete group', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to delete group', 'error');
+        }
+    }
+
+    function confirmDeleteContest(contestId) {
+        if (confirm('Are you sure you want to delete this contest?')) {
+            deleteContest(contestId);
+        }
+    }
+
+    async function deleteContest(contestId) {
+        try {
+            const response = await fetch(`/api/contests/${contestId}`, { method: 'DELETE' });
+
+            if (response.ok) {
+                showToast('Contest deleted successfully!', 'success');
+                loadGroupContests(currentGroupId);
+            } else {
+                showToast('Failed to delete contest', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to delete contest', 'error');
+        }
+    }
+
+    // Default Participants Management
+    function openDefaultParticipantsModal() {
+        const participants = currentGroup.default_participants || [];
+        openModal('Default Participants', `
+            <form id="defaultParticipantsForm" onsubmit="submitDefaultParticipants(event)">
+                <div class="form-group">
+                    <label for="defaultParticipants">Default Participant Handles (${participants.length} total)</label>
+                    <textarea id="defaultParticipants" name="defaultParticipants" rows="10" placeholder="Enter handles, one per line or comma-separated">${participants.join('\n')}</textarea>
+                    <small class="form-hint">These handles will be available to apply to all contests in this group</small>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Default Participants</button>
+                </div>
+            </form>
+        `);
+    }
+
+    async function submitDefaultParticipants(event) {
+        event.preventDefault();
+        const participantsRaw = document.getElementById('defaultParticipants').value;
+
+        const participants = participantsRaw
+            .split(/[\n,]+/)
+            .map(h => h.trim())
+            .filter(h => h.length > 0);
+
+        try {
+            const response = await fetch(`/api/groups/${currentGroupId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ default_participants: participants })
+            });
+
+            if (response.ok) {
+                const updatedGroup = await response.json();
+                currentGroup = updatedGroup;
+                closeModal();
+                showToast(`Saved ${participants.length} default participants!`, 'success');
+            } else {
+                showToast('Failed to save default participants', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to save default participants', 'error');
+        }
+    }
+
+    async function applyParticipantsToAll() {
+        if (!currentGroup.default_participants || currentGroup.default_participants.length === 0) {
+            showToast('No default participants set. Add some first!', 'warning');
+            return;
+        }
+
+        if (!confirm(`⚠️ IRREVERSIBLE ACTION ⚠️\n\nThis will add ${currentGroup.default_participants.length} participants to ALL contests in this group.\n\nExisting participants will be merged with default participants.\n\nContinue?`)) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/groups/${currentGroupId}/apply-participants`, { method: 'POST' });
+            const data = await response.json();
+
+            if (data.error) {
+                showToast(data.error, 'error');
+                return;
+            }
+
+            showToast(`Applied participants to ${data.contests_updated} contests!`, 'success');
+            loadGroupContests(currentGroupId);
+        } catch (error) {
+            showToast('Failed to apply participants', 'error');
+        }
+    }
+
+    // Edit Group Modal
+    async function openEditGroupModal() {
+        // Fetch available spreadsheets
+        let spreadsheets = [];
+        try {
+            const response = await fetch('/api/spreadsheets');
+            spreadsheets = await response.json();
+        } catch (e) {
+            console.error('Failed to load spreadsheets', e);
+        }
+
+        const spreadsheetOptions = spreadsheets.map(s =>
+            `<option value="${s.id}" ${currentGroup.spreadsheet_id === s.id ? 'selected' : ''}>${escapeHtml(s.name)}</option>`
+        ).join('');
+
+        openModal('Edit Group', `
+            <form id="editGroupForm" onsubmit="submitEditGroup(event)">
+                <div class="form-group">
+                    <label for="editGroupName">Group Name</label>
+                    <input type="text" id="editGroupName" value="${escapeHtml(currentGroup.name)}" required>
+                </div>
+                <div class="form-group">
+                    <label for="editGroupDescription">Description</label>
+                    <textarea id="editGroupDescription" rows="3" placeholder="Group description">${escapeHtml(currentGroup.description || '')}</textarea>
+                </div>
+                <div class="form-group">
+                    <label for="editGroupSpreadsheet">Linked Spreadsheet</label>
+                    <select id="editGroupSpreadsheet">
+                        <option value="">None (no participant links)</option>
+                        ${spreadsheetOptions}
+                    </select>
+                    <small class="form-hint">Links participant handles to this spreadsheet</small>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        `);
+    }
+
+    async function submitEditGroup(event) {
+        event.preventDefault();
+        const name = document.getElementById('editGroupName').value;
+        const description = document.getElementById('editGroupDescription').value;
+        const spreadsheetId = document.getElementById('editGroupSpreadsheet').value;
+
+        try {
+            const response = await fetch(`/api/groups/${currentGroupId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name,
+                    description,
+                    spreadsheet_id: spreadsheetId ? parseInt(spreadsheetId) : null
+                })
+            });
+
+            if (response.ok) {
+                const updatedGroup = await response.json();
+                currentGroup = updatedGroup;
+                document.getElementById('groupDetailName').textContent = name;
+                document.getElementById('groupDetailDescription').textContent = description;
+                closeModal();
+                showToast('Group updated!', 'success');
+                loadGroups(); // Refresh list too
+            } else {
+                showToast('Failed to update group', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to update group', 'error');
+        }
+    }
+
+    // Batch Add Contests
+    function openBatchAddModal() {
+        openModal('Batch Add Contests', `
+            <form id="batchAddForm" onsubmit="submitBatchAdd(event)">
+                <div class="form-group">
+                    <label for="batchContestIds">Codeforces Contest IDs</label>
+                    <textarea id="batchContestIds" rows="6" placeholder="Enter contest IDs, one per line or comma-separated. Example:&#10;1950&#10;1951&#10;1952"></textarea>
+                    <small class="form-hint">Each contest will auto-import its participants from standings</small>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="batchMinSolved">Min Solved</label>
+                        <input type="number" id="batchMinSolved" value="1" min="1">
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="batchIsPercent">
+                            Use Percentage
+                        </label>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add Contests</button>
+                </div>
+            </form>
+        `);
+    }
+
+    async function submitBatchAdd(event) {
+        event.preventDefault();
+        const idsRaw = document.getElementById('batchContestIds').value;
+        const minSolved = parseInt(document.getElementById('batchMinSolved').value) || 1;
+        const isPercent = document.getElementById('batchIsPercent').checked;
+
+        const ids = idsRaw
+            .split(/[\n,]+/)
+            .map(id => parseInt(id.trim()))
+            .filter(id => !isNaN(id));
+
+        if (ids.length === 0) {
+            showToast('Please enter at least one valid contest ID', 'warning');
+            return;
+        }
+
+        closeModal();
+        showToast(`Adding ${ids.length} contests... This may take a moment.`, 'info');
+
+        let added = 0;
+        let failed = 0;
+
+        for (const cfContestId of ids) {
+            try {
+                const response = await fetch(`/api/groups/${currentGroupId}/contests`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cf_contest_id: cfContestId, min_solved: minSolved, min_solved_is_percent: isPercent })
+                });
+
+                if (response.ok) {
+                    added++;
+                } else {
+                    failed++;
+                }
+            } catch (error) {
+                failed++;
+            }
+        }
+
+        showToast(`Added ${added} contests. ${failed > 0 ? `${failed} failed.` : ''}`, added > 0 ? 'success' : 'error');
+        loadGroupContests(currentGroupId);
+    }
+
+    // View Switching
+    function switchGroupView(view) {
+        document.getElementById('tabContests').classList.remove('active');
+        document.getElementById('tabOverview').classList.remove('active');
+        document.getElementById('contestsList').style.display = 'none';
+        document.getElementById('overviewContainer').style.display = 'none';
+
+        if (view === 'contests') {
+            document.getElementById('tabContests').classList.add('active');
+            document.getElementById('contestsList').style.display = 'block';
+        } else if (view === 'overview') {
+            document.getElementById('tabOverview').classList.add('active');
+            document.getElementById('overviewContainer').style.display = 'block';
+            loadGroupOverview();
+        }
+    }
+
+    let overviewData = null;
+    let selectedContests = new Set();
+
+    async function loadGroupOverview() {
+        const container = document.getElementById('overviewContainer');
+        container.innerHTML = '<div class="loading-spinner">Loading overview...</div>';
+
+        try {
+            const response = await fetch(`/api/groups/${currentGroupId}/overview`);
+            overviewData = await response.json();
+
+            if (overviewData.error) {
+                container.innerHTML = `<div class="error-state">${overviewData.error}</div>`;
+                return;
+            }
+
+            if (overviewData.participants.length === 0 || overviewData.contests.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state small">
+                        <div class="empty-icon">📊</div>
+                        <h4>No Data Available</h4>
+                        <p>Add contests and refresh results to see the overview.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Initialize selected contests to all
+            if (selectedContests.size === 0) {
+                overviewData.contests.forEach(c => selectedContests.add(c.id));
+            }
+
+            renderOverview();
+
+        } catch (error) {
+            console.error('Error loading overview:', error);
+            container.innerHTML = '<div class="error-state">Failed to load overview</div>';
+        }
+    }
+
+    function renderOverview() {
+        if (!overviewData) return;
+
+        const container = document.getElementById('overviewContainer');
+        const contests = overviewData.contests.filter(c => selectedContests.has(c.id));
+
+        // Calculate stats for each participant
+        const participantStats = overviewData.participants.map(p => {
+            let passes = 0;
+            let totalSolved = 0;
+            for (const contest of contests) {
+                const result = p.results[contest.id];
+                if (result && result.participated) {
+                    if (result.passed) passes++;
+                    totalSolved += result.solved_count || 0;
+                }
+            }
+            return { ...p, passes, totalSolved };
+        });
+
+        // Sort by passes (desc), then total solved (desc)
+        participantStats.sort((a, b) => {
+            if (b.passes !== a.passes) return b.passes - a.passes;
+            return b.totalSolved - a.totalSolved;
+        });
+
+        // Build filter UI
+        let html = `
+            <div class="overview-filters">
+                <label class="filter-label">Filter Contests:</label>
+                <div class="filter-chips">
+                    <button class="chip ${selectedContests.size === overviewData.contests.length ? 'active' : ''}" onclick="toggleAllContests(true)">All</button>
+                    <button class="chip ${selectedContests.size === 0 ? 'active' : ''}" onclick="toggleAllContests(false)">None</button>
+                    ${overviewData.contests.map(c => `
+                        <button class="chip ${selectedContests.has(c.id) ? 'active' : ''}" onclick="toggleContest(${c.id})">
+                            ${escapeHtml(c.name.substring(0, 15))}${c.name.length > 15 ? '...' : ''}
+                        </button>
+                    `).join('')}
+                </div>
+            </div>
+            <div class="overview-table-container">
+                <table class="data-table overview-table">
+                    <thead>
+                        <tr>
+                            <th class="rank-col">#</th>
+                            <th class="handle-col">Handle</th>
+                            <th class="stats-col">Passes</th>
+                            <th class="stats-col">Solved</th>
+                            ${contests.map(c => `
+                                <th class="contest-col" title="${escapeHtml(c.name)}">
+                                    <div class="contest-header">
+                                        <span class="contest-name">${escapeHtml(c.name.substring(0, 15))}${c.name.length > 15 ? '...' : ''}</span>
+                                        <span class="contest-stats">${c.total_problems}P / ${c.min_solved_is_percent ? c.min_solved + '%' : c.required_solved}</span>
+                                    </div>
+                                </th>
+                            `).join('')}
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+
+        participantStats.forEach((participant, index) => {
+            const rank = index + 1;
+            let rowClass = '';
+            if (rank === 1) { rowClass = 'rank-gold'; }
+            else if (rank === 2) { rowClass = 'rank-silver'; }
+            else if (rank === 3) { rowClass = 'rank-bronze'; }
+
+            html += `<tr class="${rowClass}">
+                <td class="rank-col">${rank}</td>
+                <td class="handle-col">
+                    <a href="https://codeforces.com/profile/${participant.handle}" target="_blank" class="handle-link">
+                        ${escapeHtml(participant.handle)}
+                    </a>
+                    ${currentGroup.spreadsheet ? `<button class="spreadsheet-link" onclick="viewParticipantData('${participant.handle}')" title="View participant data">📋</button>` : ''}
+                </td>
+                <td class="stats-col">${participant.passes}</td>
+                <td class="stats-col">${participant.totalSolved}</td>`;
+
+            for (const contest of contests) {
+                const result = participant.results[contest.id];
+                let cellClass = 'cell-empty';
+                let cellContent = '-';
+
+                if (result) {
+                    if (!result.participated) {
+                        cellClass = 'cell-not-participated';
+                        cellContent = '⚪';
+                    } else if (result.passed) {
+                        cellClass = 'cell-passed';
+                        cellContent = `✅ ${result.solved_count}`;
+                    } else {
+                        cellClass = 'cell-failed';
+                        cellContent = `❌ ${result.solved_count}`;
+                    }
+                }
+
+                html += `<td class="${cellClass}">${cellContent}</td>`;
+            }
+
+            html += '</tr>';
+        });
+
+        html += `
+                    </tbody>
+                </table>
+            </div>
+        `;
+
+        container.innerHTML = html;
+    }
+
+    function toggleContest(contestId) {
+        if (selectedContests.has(contestId)) {
+            selectedContests.delete(contestId);
+        } else {
+            selectedContests.add(contestId);
+        }
+        renderOverview();
+    }
+
+    function toggleAllContests(selectAll) {
+        selectedContests.clear();
+        if (selectAll && overviewData) {
+            overviewData.contests.forEach(c => selectedContests.add(c.id));
+        }
+        renderOverview();
+    }
+
+    // Quick Refresh Contest
+    async function quickRefresh(contestId, event) {
+        event.stopPropagation();
+        const btn = event.target;
+        btn.disabled = true;
+        btn.textContent = '⏳';
+
+        try {
+            const response = await fetch(`/api/contests/${contestId}/refresh`, { method: 'POST' });
+            const data = await response.json();
+
+            if (data.success) {
+                showToast('Results refreshed!', 'success');
+                btn.textContent = '✅';
+                setTimeout(() => { btn.textContent = '🔄'; btn.disabled = false; }, 1500);
+            } else {
+                showToast(data.error || 'Refresh failed', 'error');
+                btn.textContent = '❌';
+                setTimeout(() => { btn.textContent = '🔄'; btn.disabled = false; }, 1500);
+            }
+        } catch (error) {
+            showToast('Refresh failed', 'error');
+            btn.textContent = '🔄';
+            btn.disabled = false;
+        }
+    }
+
+    async function viewParticipantData(handle) {
+        if (!currentGroup.spreadsheet) {
+            showToast('No spreadsheet linked to this group', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/spreadsheets/${currentGroup.spreadsheet.id}/participant/${handle}`);
+            const data = await response.json();
+
+            if (data.error) {
+                showToast(`Participant "${handle}" not found in spreadsheet`, 'warning');
+                return;
+            }
+
+            let html = '<div class="participant-data">';
+            for (const [key, value] of Object.entries(data)) {
+                html += `<div class="info-row"><span class="info-label">${escapeHtml(key)}</span><span class="info-value">${escapeHtml(value)}</span></div>`;
+            }
+            html += '</div>';
+
+            openModal(`Participant: ${handle}`, html);
+
+        } catch (error) {
+            showToast('Failed to load participant data', 'error');
+        }
+    }
+</script>
+{% endblock %}

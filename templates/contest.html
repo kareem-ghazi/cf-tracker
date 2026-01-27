@@ -1,0 +1,639 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ contest.name }} - CF Tracker{% endblock %}
+{% block header %}Contest Tracking{% endblock %}
+
+{% block header_actions %}
+<button class="btn btn-primary" onclick="refreshResults()">
+    <span>🔄</span> Refresh Results
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="contest-page">
+    <!-- Contest Info -->
+    <div class="contest-info-card">
+        <div class="contest-info-header">
+            <div>
+                <a href="/groups?group={{ contest.group_id }}" class="btn btn-back btn-sm">← Back to Group</a>
+                <h2 id="contestName">{{ contest.name }}</h2>
+                <p class="contest-meta">
+                    <span class="badge badge-info">CF #{{ contest.cf_contest_id }}</span>
+                    <span class="meta-item">Problems: <strong id="totalProblems">{{ contest.total_problems
+                            }}</strong></span>
+                    <span class="meta-item">Min Required: <strong id="minSolved">{{ contest.get_required_solved()
+                            }}</strong>{% if contest.min_solved_is_percent %} ({{ contest.min_solved }}%){% endif
+                        %}</span>
+                    <span class="meta-item">Participants: <strong id="participantCount">{{
+                            contest.get_participants_list()|length }}</strong></span>
+                </p>
+            </div>
+            <div class="contest-actions">
+                <button class="btn btn-secondary" onclick="openEditParticipantsModal()">✏️ Edit Participants</button>
+                <button class="btn btn-secondary" onclick="openEditSettingsModal()">⚙️ Settings</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="results-summary" id="resultsSummary">
+        <div class="summary-card passed">
+            <div class="summary-icon">✅</div>
+            <div class="summary-content">
+                <div class="summary-value" id="passedCount">-</div>
+                <div class="summary-label">Passed</div>
+            </div>
+        </div>
+        <div class="summary-card failed">
+            <div class="summary-icon">❌</div>
+            <div class="summary-content">
+                <div class="summary-value" id="failedCount">-</div>
+                <div class="summary-label">Did Not Pass</div>
+            </div>
+        </div>
+        <div class="summary-card not-participated">
+            <div class="summary-icon">⚪</div>
+            <div class="summary-content">
+                <div class="summary-value" id="notParticipatedCount">-</div>
+                <div class="summary-label">Not Entered</div>
+            </div>
+        </div>
+        <div class="summary-card total"
+            title="Pass Rate = (Participants who passed / Total participants who entered the contest) × 100%">
+            <div class="summary-icon">📊</div>
+            <div class="summary-content">
+                <div class="summary-value" id="passRate">-</div>
+                <div class="summary-label">Pass Rate</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- View Tabs -->
+    <div class="view-tabs">
+        <button class="tab-btn active" onclick="switchView('results')" id="tabResults">📋 Results</button>
+        <button class="tab-btn" onclick="switchView('standings')" id="tabStandings">🏆 Standings</button>
+        <button class="tab-btn" onclick="switchView('progress')" id="tabProgress">📈 Progress</button>
+    </div>
+
+    <!-- Results View -->
+    <div class="view-container" id="viewResults">
+        <!-- Filter and Export -->
+        <div class="results-toolbar">
+            <div class="filter-group">
+                <label>Filter:</label>
+                <select id="resultFilter" onchange="applyFilter()">
+                    <option value="all">All Participants</option>
+                    <option value="passed">Passed Only</option>
+                    <option value="failed">Did Not Pass</option>
+                    <option value="participated">Participated Only</option>
+                    <option value="not_participated">Not Entered</option>
+                </select>
+            </div>
+            <div class="export-group">
+                <button class="btn btn-secondary btn-sm" onclick="exportResults('all')">📋 Export All</button>
+                <button class="btn btn-success btn-sm" onclick="exportResults('passed')">📋 Export Passed</button>
+                <button class="btn btn-warning btn-sm" onclick="exportResults('failed')">📋 Export Failed</button>
+            </div>
+        </div>
+
+        <!-- Results Table -->
+        <div class="results-table-container">
+            <table class="data-table" id="resultsTable">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Handle</th>
+                        <th>Problems Solved</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="resultsTableBody">
+                    <tr>
+                        <td colspan="4" class="loading-cell">Loading results...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Standings View -->
+    <div class="view-container" id="viewStandings" style="display: none;">
+        <div class="results-table-container">
+            <table class="data-table" id="standingsTable">
+                <thead>
+                    <tr>
+                        <th>Rank</th>
+                        <th>Handle</th>
+                        <th>Solved</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="standingsTableBody">
+                    <tr>
+                        <td colspan="4" class="loading-cell">Loading standings...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Progress View -->
+    <div class="view-container" id="viewProgress" style="display: none;">
+        <div class="chart-container">
+            <canvas id="progressChart"></canvas>
+        </div>
+        <div id="noHistoryMessage" class="empty-state small" style="display: none;">
+            <div class="empty-icon">📊</div>
+            <h4>No Progress Data Yet</h4>
+            <p>Refresh results on different days to track progress over time.</p>
+        </div>
+    </div>
+
+    <!-- Export Modal -->
+    <div class="export-result" id="exportResult" style="display: none;">
+        <div class="export-header">
+            <h3>Exported Handles</h3>
+            <button class="btn btn-sm" onclick="copyExport()">📋 Copy</button>
+        </div>
+        <textarea id="exportText" readonly rows="4"></textarea>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+    const contestId = {{ contest.id }};
+    const groupId = {{ contest.group_id }};
+    let allResults = [];
+    let progressChart = null;
+    let spreadsheetId = null;
+
+    document.addEventListener('DOMContentLoaded', async function () {
+        // Fetch group info to get spreadsheet URL
+        try {
+            const response = await fetch(`/api/groups/${groupId}`);
+            const group = await response.json();
+            if (group.spreadsheet) {
+                spreadsheetId = group.spreadsheet.id;
+            }
+        } catch (e) {
+            console.log('Could not fetch group info for spreadsheet link');
+        }
+        loadResults();
+    });
+
+    function switchView(view) {
+        // Hide all views
+        document.getElementById('viewResults').style.display = 'none';
+        document.getElementById('viewStandings').style.display = 'none';
+        document.getElementById('viewProgress').style.display = 'none';
+
+        // Remove active from all tabs
+        document.getElementById('tabResults').classList.remove('active');
+        document.getElementById('tabStandings').classList.remove('active');
+        document.getElementById('tabProgress').classList.remove('active');
+
+        // Show selected view
+        if (view === 'results') {
+            document.getElementById('viewResults').style.display = 'block';
+            document.getElementById('tabResults').classList.add('active');
+        } else if (view === 'standings') {
+            document.getElementById('viewStandings').style.display = 'block';
+            document.getElementById('tabStandings').classList.add('active');
+            loadStandings();
+        } else if (view === 'progress') {
+            document.getElementById('viewProgress').style.display = 'block';
+            document.getElementById('tabProgress').classList.add('active');
+            loadProgress();
+        }
+    }
+
+    async function loadResults() {
+        const tbody = document.getElementById('resultsTableBody');
+
+        try {
+            const response = await fetch(`/api/contests/${contestId}/results`);
+            const data = await response.json();
+
+            if (data.error) {
+                showToast(data.error, 'error');
+                return;
+            }
+
+            allResults = data.results;
+
+            // Update summary
+            document.getElementById('passedCount').textContent = data.summary.passed;
+            document.getElementById('failedCount').textContent = data.summary.failed;
+            document.getElementById('notParticipatedCount').textContent = data.summary.not_participated || 0;
+            document.getElementById('passRate').textContent = data.summary.pass_rate + '%';
+
+            // Render results
+            renderResults(allResults);
+
+        } catch (error) {
+            console.error('Error loading results:', error);
+            tbody.innerHTML = '<tr><td colspan="4" class="error-cell">Failed to load results. Try refreshing.</td></tr>';
+        }
+    }
+
+    function renderResults(results) {
+        const tbody = document.getElementById('resultsTableBody');
+
+        if (results.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="4" class="empty-cell">
+                        No results yet. Click "Refresh Results" to fetch from Codeforces.
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        // Sort: passed first, then failed, then not participated
+        const sorted = [...results].sort((a, b) => {
+            if (a.participated !== b.participated) return b.participated - a.participated;
+            if (a.passed !== b.passed) return b.passed - a.passed;
+            return b.solved_count - a.solved_count;
+        });
+
+        tbody.innerHTML = sorted.map((result, index) => {
+            let rowClass = 'row-not-participated';
+            let statusBadge = '<span class="status-badge status-not-participated">⚪ Not Entered</span>';
+
+            if (result.participated) {
+                rowClass = result.passed ? 'row-passed' : 'row-failed';
+                statusBadge = result.passed
+                    ? '<span class="status-badge status-passed">✅ Passed</span>'
+                    : '<span class="status-badge status-failed">❌ Did Not Pass</span>';
+            }
+
+            return `
+                <tr class="${rowClass}">
+                    <td>${index + 1}</td>
+                    <td>
+                        <a href="https://codeforces.com/profile/${result.handle}" target="_blank" class="handle-link">
+                            ${escapeHtml(result.handle)}
+                        </a>
+                        ${spreadsheetId ? `<button class="spreadsheet-link" onclick="viewParticipantData('${result.handle}')" title="View participant data">📋</button>` : ''}
+                    </td>
+                    <td>${result.participated ? result.solved_count : '-'}</td>
+                    <td>${statusBadge}</td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    function applyFilter() {
+        const filter = document.getElementById('resultFilter').value;
+
+        let filtered = allResults;
+        if (filter === 'passed') {
+            filtered = allResults.filter(r => r.passed);
+        } else if (filter === 'failed') {
+            filtered = allResults.filter(r => !r.passed && r.participated);
+        } else if (filter === 'participated') {
+            filtered = allResults.filter(r => r.participated);
+        } else if (filter === 'not_participated') {
+            filtered = allResults.filter(r => !r.participated);
+        }
+
+        renderResults(filtered);
+    }
+
+    async function loadStandings() {
+        const tbody = document.getElementById('standingsTableBody');
+
+        try {
+            const response = await fetch(`/api/contests/${contestId}/standings`);
+            const data = await response.json();
+
+            if (data.error) {
+                showToast(data.error, 'error');
+                return;
+            }
+
+            const standings = data.standings;
+
+            if (standings.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">No standings data. Refresh results first.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = standings.map((result, index) => {
+                let rowClass = result.participated ? '' : 'row-not-participated';
+                let rankDisplay = result.participated && result.rank > 0 ? result.rank : '-';
+                let statusBadge = '';
+
+                // Add top 3 highlighting based on index (standings are sorted by rank)
+                if (index === 0 && result.participated) rowClass += ' rank-gold';
+                else if (index === 1 && result.participated) rowClass += ' rank-silver';
+                else if (index === 2 && result.participated) rowClass += ' rank-bronze';
+
+                if (!result.participated) {
+                    statusBadge = '<span class="status-badge status-not-participated">⚪ Not Entered</span>';
+                } else if (result.passed) {
+                    statusBadge = '<span class="status-badge status-passed">✅ Passed</span>';
+                } else {
+                    statusBadge = '<span class="status-badge status-failed">❌ Did Not Pass</span>';
+                }
+
+                return `
+                    <tr class="${rowClass}">
+                        <td>${rankDisplay}</td>
+                        <td>
+                            <a href="https://codeforces.com/profile/${result.handle}" target="_blank" class="handle-link">
+                                ${escapeHtml(result.handle)}
+                            </a>
+                            ${spreadsheetId ? `<button class="spreadsheet-link" onclick="viewParticipantData('${result.handle}')" title="View participant data">📋</button>` : ''}
+                        </td>
+                        <td>${result.participated ? result.solved_count : '-'}</td>
+                        <td>${statusBadge}</td>
+                    </tr>
+                `;
+            }).join('');
+
+        } catch (error) {
+            console.error('Error loading standings:', error);
+            tbody.innerHTML = '<tr><td colspan="4" class="error-cell">Failed to load standings.</td></tr>';
+        }
+    }
+
+    async function loadProgress() {
+        try {
+            const response = await fetch(`/api/contests/${contestId}/history`);
+            const data = await response.json();
+
+            if (data.error) {
+                showToast(data.error, 'error');
+                return;
+            }
+
+            const history = data.history;
+
+            if (history.length === 0) {
+                document.getElementById('noHistoryMessage').style.display = 'block';
+                document.querySelector('.chart-container').style.display = 'none';
+                return;
+            }
+
+            document.getElementById('noHistoryMessage').style.display = 'none';
+            document.querySelector('.chart-container').style.display = 'block';
+
+            // Prepare chart data
+            const labels = history.map(h => h.fetch_date);
+            const passedData = history.map(h => h.passed_count);
+            const failedData = history.map(h => h.failed_count);
+            const notParticipatedData = history.map(h => h.not_participated_count);
+
+            // Destroy existing chart if any
+            if (progressChart) {
+                progressChart.destroy();
+            }
+
+            // Create chart
+            const ctx = document.getElementById('progressChart').getContext('2d');
+            progressChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Passed',
+                            data: passedData,
+                            borderColor: '#22c55e',
+                            backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Failed',
+                            data: failedData,
+                            borderColor: '#b12a1c',
+                            backgroundColor: 'rgba(177, 42, 28, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        },
+                        {
+                            label: 'Not Entered',
+                            data: notParticipatedData,
+                            borderColor: '#6b7280',
+                            backgroundColor: 'rgba(107, 114, 128, 0.1)',
+                            fill: true,
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: {
+                                color: '#eaeaea'
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#9ca3af' },
+                            grid: { color: 'rgba(255,255,255,0.05)' }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: { color: '#9ca3af' },
+                            grid: { color: 'rgba(255,255,255,0.05)' }
+                        }
+                    }
+                }
+            });
+
+        } catch (error) {
+            console.error('Error loading progress:', error);
+            showToast('Failed to load progress data', 'error');
+        }
+    }
+
+    async function refreshResults() {
+        showToast('Refreshing results from Codeforces...', 'info');
+
+        try {
+            const response = await fetch(`/api/contests/${contestId}/refresh`, { method: 'POST' });
+            const data = await response.json();
+
+            if (data.error) {
+                showToast(data.error, 'error');
+                return;
+            }
+
+            showToast('Results refreshed successfully!', 'success');
+
+            // Update total problems display
+            if (data.total_problems) {
+                document.getElementById('totalProblems').textContent = data.total_problems;
+            }
+
+            loadResults();
+
+        } catch (error) {
+            showToast('Failed to refresh results', 'error');
+        }
+    }
+
+    async function exportResults(filter) {
+        try {
+            const response = await fetch(`/api/contests/${contestId}/export?filter=${filter}`);
+            const data = await response.json();
+
+            document.getElementById('exportText').value = data.handles;
+            document.getElementById('exportResult').style.display = 'block';
+
+            showToast(`Exported ${data.count} handles (${filter})`, 'success');
+
+        } catch (error) {
+            showToast('Failed to export results', 'error');
+        }
+    }
+
+    function copyExport() {
+        const textarea = document.getElementById('exportText');
+        textarea.select();
+        document.execCommand('copy');
+        showToast('Copied to clipboard!', 'success');
+    }
+
+    function openEditParticipantsModal() {
+        fetch(`/api/contests/${contestId}`)
+            .then(r => r.json())
+            .then(contest => {
+                openModal('Edit Participants', `
+                    <form id="editParticipantsForm" onsubmit="submitEditParticipants(event)">
+                        <div class="form-group">
+                            <label for="participants">Codeforces Handles (${contest.participants.length} total)</label>
+                            <textarea id="participants" name="participants" rows="10" placeholder="Enter handles, one per line or comma-separated">${contest.participants.join('\n')}</textarea>
+                            <small class="form-hint">Enter each handle on a new line or separate with commas</small>
+                        </div>
+                        <div class="form-actions">
+                            <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Save Participants</button>
+                        </div>
+                    </form>
+                `);
+            });
+    }
+
+    async function submitEditParticipants(event) {
+        event.preventDefault();
+        const participantsRaw = document.getElementById('participants').value;
+
+        const participants = participantsRaw
+            .split(/[\n,]+/)
+            .map(h => h.trim())
+            .filter(h => h.length > 0);
+
+        try {
+            const response = await fetch(`/api/contests/${contestId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ participants })
+            });
+
+            if (response.ok) {
+                closeModal();
+                showToast('Participants updated! Click Refresh to update results.', 'success');
+                document.getElementById('participantCount').textContent = participants.length;
+            } else {
+                showToast('Failed to update participants', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to update participants', 'error');
+        }
+    }
+
+    function openEditSettingsModal() {
+        fetch(`/api/contests/${contestId}`)
+            .then(r => r.json())
+            .then(contest => {
+                openModal('Contest Settings', `
+                    <form id="editSettingsForm" onsubmit="submitEditSettings(event)">
+                        <div class="form-group">
+                            <label for="contestName">Contest Name</label>
+                            <input type="text" id="editContestName" value="${escapeHtml(contest.name)}" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="minSolved">Minimum to Pass</label>
+                            <div class="input-with-toggle">
+                                <input type="number" id="editMinSolved" value="${contest.min_solved}" min="1" required>
+                                <label class="toggle-label">
+                                    <input type="checkbox" id="editMinSolvedIsPercent" ${contest.min_solved_is_percent ? 'checked' : ''}>
+                                    <span>Use percentage (%)</span>
+                                </label>
+                            </div>
+                            <small class="form-hint">Total problems: ${contest.total_problems || 'Unknown'}</small>
+                        </div>
+                        <div class="form-actions">
+                            <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Save Settings</button>
+                        </div>
+                    </form>
+                `);
+            });
+    }
+
+    async function submitEditSettings(event) {
+        event.preventDefault();
+        const name = document.getElementById('editContestName').value;
+        const minSolved = parseInt(document.getElementById('editMinSolved').value);
+        const minSolvedIsPercent = document.getElementById('editMinSolvedIsPercent').checked;
+
+        try {
+            const response = await fetch(`/api/contests/${contestId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, min_solved: minSolved, min_solved_is_percent: minSolvedIsPercent })
+            });
+
+            if (response.ok) {
+                closeModal();
+                showToast('Settings saved! Click Refresh to recalculate pass/fail.', 'success');
+                document.getElementById('contestName').textContent = name;
+                document.getElementById('minSolved').textContent = minSolved;
+            } else {
+                showToast('Failed to save settings', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to save settings', 'error');
+        }
+    }
+
+    async function viewParticipantData(handle) {
+        if (!spreadsheetId) {
+            showToast('No spreadsheet linked to this group', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/spreadsheets/${spreadsheetId}/participant/${handle}`);
+            const data = await response.json();
+
+            if (data.error) {
+                showToast(`Participant "${handle}" not found in spreadsheet`, 'warning');
+                return;
+            }
+
+            let html = '<div class="participant-data">';
+            for (const [key, value] of Object.entries(data)) {
+                html += `<div class="info-row"><span class="info-label">${escapeHtml(key)}</span><span class="info-value">${escapeHtml(value)}</span></div>`;
+            }
+            html += '</div>';
+
+            openModal(`Participant: ${handle}`, html);
+
+        } catch (error) {
+            showToast('Failed to load participant data', 'error');
+        }
+    }
+</script>
+{% endblock %}

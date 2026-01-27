@@ -1,0 +1,174 @@
+{% extends 'base.html' %}
+
+{% block title %}Dashboard - CF Tracker{% endblock %}
+{% block header %}Analytics Dashboard{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <!-- Summary Cards -->
+    <div class="stats-grid" id="statsGrid">
+        <div class="stat-card">
+            <div class="stat-icon">👥</div>
+            <div class="stat-content">
+                <div class="stat-value" id="totalGroups">-</div>
+                <div class="stat-label">Training Groups</div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">🏆</div>
+            <div class="stat-content">
+                <div class="stat-value" id="totalContests">-</div>
+                <div class="stat-label">Tracked Contests</div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon">👤</div>
+            <div class="stat-content">
+                <div class="stat-value" id="totalParticipants">-</div>
+                <div class="stat-label">Total Participants</div>
+            </div>
+        </div>
+        <div class="stat-card accent">
+            <div class="stat-icon">📈</div>
+            <div class="stat-content">
+                <div class="stat-value" id="overallPassRate">-</div>
+                <div class="stat-label">Overall Pass Rate</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Groups Overview -->
+    <section class="dashboard-section">
+        <div class="section-header">
+            <h2>Groups Overview</h2>
+            <a href="/groups" class="btn btn-secondary btn-sm">View All</a>
+        </div>
+        <div class="groups-table-container">
+            <table class="data-table" id="groupsTable">
+                <thead>
+                    <tr>
+                        <th>Group Name</th>
+                        <th>Contests</th>
+                        <th>Participants</th>
+                        <th>Pass Rate</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="groupsTableBody">
+                    <tr>
+                        <td colspan="5" class="loading-cell">Loading...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Quick Actions -->
+    <section class="dashboard-section">
+        <div class="section-header">
+            <h2>Quick Actions</h2>
+        </div>
+        <div class="quick-actions">
+            <button class="action-card" onclick="openCreateGroupModal()">
+                <div class="action-icon">➕</div>
+                <div class="action-text">Create New Group</div>
+            </button>
+            <button class="action-card" onclick="window.location.href='/groups'">
+                <div class="action-icon">📋</div>
+                <div class="action-text">Manage Groups</div>
+            </button>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        loadDashboardData();
+    });
+
+    async function loadDashboardData() {
+        try {
+            const response = await fetch('/api/analytics');
+            const data = await response.json();
+
+            if (data.error) {
+                showToast('Failed to load analytics', 'error');
+                return;
+            }
+
+            // Update stats
+            document.getElementById('totalGroups').textContent = data.summary.total_groups;
+            document.getElementById('totalContests').textContent = data.summary.total_contests;
+            document.getElementById('totalParticipants').textContent = data.summary.total_participants;
+            document.getElementById('overallPassRate').textContent = data.summary.overall_pass_rate + '%';
+
+            // Update groups table
+            const tbody = document.getElementById('groupsTableBody');
+            if (data.groups.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">No groups created yet. <a href="/groups">Create one now!</a></td></tr>';
+            } else {
+                tbody.innerHTML = data.groups.map(group => `
+                    <tr>
+                        <td><strong>${escapeHtml(group.name)}</strong></td>
+                        <td>${group.contest_count}</td>
+                        <td>${group.participant_count}</td>
+                        <td><span class="badge ${group.pass_rate >= 50 ? 'badge-success' : 'badge-warning'}">${group.pass_rate}%</span></td>
+                        <td>
+                            <a href="/groups?group=${group.id}" class="btn btn-sm btn-secondary">View</a>
+                        </td>
+                    </tr>
+                `).join('');
+            }
+        } catch (error) {
+            console.error('Error loading dashboard:', error);
+            showToast('Failed to load dashboard data', 'error');
+        }
+    }
+
+    function openCreateGroupModal() {
+        openModal('Create New Group', `
+            <form id="createGroupForm" onsubmit="submitCreateGroup(event)">
+                <div class="form-group">
+                    <label for="groupName">Group Name</label>
+                    <input type="text" id="groupName" name="name" required placeholder="e.g., Fall 2024 Training">
+                </div>
+                <div class="form-group">
+                    <label for="groupDescription">Description (optional)</label>
+                    <textarea id="groupDescription" name="description" rows="3" placeholder="Describe this training group..."></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Create Group</button>
+                </div>
+            </form>
+        `);
+    }
+
+    async function submitCreateGroup(event) {
+        event.preventDefault();
+        const name = document.getElementById('groupName').value;
+        const description = document.getElementById('groupDescription').value;
+
+        try {
+            const response = await fetch('/api/groups', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, description })
+            });
+
+            if (response.ok) {
+                closeModal();
+                showToast('Group created successfully!', 'success');
+                loadDashboardData();
+            } else {
+                const data = await response.json();
+                showToast(data.error || 'Failed to create group', 'error');
+            }
+        } catch (error) {
+            showToast('Failed to create group', 'error');
+        }
+    }
+</script>
+{% endblock %}

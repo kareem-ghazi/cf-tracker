@@ -13,6 +13,8 @@
 
 **CF Tracker** is a comprehensive web application designed to help competitive programming coaches and team leaders track participant performance across multiple Codeforces contests. Originally built for ICPC NMU training management, it provides real-time standings, progress analytics, and participant management features.
 
+![CF Tracker Screenshot](assets/screenshot.png)
+
 ## Features
 
 ### 📊 Dashboard Analytics

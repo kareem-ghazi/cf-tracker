@@ -15,6 +15,7 @@ echo Installing requirements...
 pip install -r requirements.txt
 
 if not exist .env (
+    setlocal EnableDelayedExpansion
     echo.
     echo .env file not found. Setting up configuration...
     echo.
@@ -27,14 +28,15 @@ if not exist .env (
     set /p API_SECRET="Enter Codeforces API Secret: "
     
     echo # Codeforces API credentials > .env
-    echo CF_API_KEY=%API_KEY% >> .env
-    echo CF_API_SECRET=%API_SECRET% >> .env
+    echo CF_API_KEY=!API_KEY! >> .env
+    echo CF_API_SECRET=!API_SECRET! >> .env
     echo. >> .env
     echo # Flask configuration >> .env
     echo FLASK_SECRET_KEY=generated_key_%RANDOM%%RANDOM%%RANDOM% >> .env
     
     echo.
     echo .env file created successfully.
+    endlocal
 )
 
 echo.

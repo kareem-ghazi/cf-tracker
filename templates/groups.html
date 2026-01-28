@@ -728,6 +728,8 @@
 
     let overviewData = null;
     let selectedContests = new Set();
+    let showPassesColumn = true;
+    let showSolvedColumn = true;
 
     async function loadGroupOverview() {
         const container = document.getElementById('overviewContainer');
@@ -805,6 +807,15 @@
                         </button>
                     `).join('')}
                 </div>
+                <div class="column-toggles" style="margin-top: 0.5rem;">
+                    <label class="filter-label">Show Columns:</label>
+                    <label class="checkbox-label" style="margin-left: 0.5rem;">
+                        <input type="checkbox" ${showPassesColumn ? 'checked' : ''} onchange="togglePassesColumn(this.checked)"> Passes
+                    </label>
+                    <label class="checkbox-label" style="margin-left: 0.5rem;">
+                        <input type="checkbox" ${showSolvedColumn ? 'checked' : ''} onchange="toggleSolvedColumn(this.checked)"> Solved
+                    </label>
+                </div>
             </div>
             <div class="overview-table-container">
                 <table class="data-table overview-table">
@@ -812,8 +823,8 @@
                         <tr>
                             <th class="rank-col">#</th>
                             <th class="handle-col">Handle</th>
-                            <th class="stats-col">Passes</th>
-                            <th class="stats-col">Solved</th>
+                            ${showPassesColumn ? '<th class="stats-col">Passes</th>' : ''}
+                            ${showSolvedColumn ? '<th class="stats-col">Solved</th>' : ''}
                             ${contests.map(c => `
                                 <th class="contest-col" title="${escapeHtml(c.name)}">
                                     <div class="contest-header">
@@ -842,8 +853,8 @@
                     </a>
                     ${currentGroup.spreadsheet ? `<button class="spreadsheet-link" onclick="viewParticipantData('${participant.handle}')" title="View participant data">📋</button>` : ''}
                 </td>
-                <td class="stats-col">${participant.passes}</td>
-                <td class="stats-col">${participant.totalSolved}</td>`;
+                ${showPassesColumn ? `<td class="stats-col">${participant.passes}</td>` : ''}
+                ${showSolvedColumn ? `<td class="stats-col">${participant.totalSolved}</td>` : ''}`;
 
             for (const contest of contests) {
                 const result = participant.results[contest.id];
@@ -892,6 +903,16 @@
         if (selectAll && overviewData) {
             overviewData.contests.forEach(c => selectedContests.add(c.id));
         }
+        renderOverview();
+    }
+
+    function togglePassesColumn(show) {
+        showPassesColumn = show;
+        renderOverview();
+    }
+
+    function toggleSolvedColumn(show) {
+        showSolvedColumn = show;
         renderOverview();
     }
 

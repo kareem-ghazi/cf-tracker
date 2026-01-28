@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/cf-tracker.svg" alt="CF Tracker Logo" width="400"/>
+  <img src="assets/cf-tracker.svg" alt="CF Tracker Logo" width="600"/>
   
   ---
   A web application to track Codeforces progress and contest performance for competitive programming training groups.

@@ -394,6 +394,13 @@
                         <label for="editParticipants">Participants (${contest.participants.length} handles)</label>
                         <textarea id="editParticipants" name="participants" rows="6">${contest.participants.join('\n')}</textarea>
                     </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="editLockParticipants" ${contest.lock_participants ? 'checked' : ''}>
+                            Lock Participants
+                        </label>
+                        <small class="form-hint">When checked, participants won't be auto-updated from the spreadsheet during refresh</small>
+                    </div>
                     <div class="form-actions">
                         <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
                         <button type="submit" class="btn btn-primary">Save Changes</button>
@@ -418,11 +425,13 @@
             .map(h => h.trim())
             .filter(h => h.length > 0);
 
+        const lockParticipants = document.getElementById('editLockParticipants').checked;
+
         try {
             const response = await fetch(`/api/contests/${contestId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, min_solved: minSolved, min_solved_is_percent: minSolvedIsPercent, participants })
+                body: JSON.stringify({ name, min_solved: minSolved, min_solved_is_percent: minSolvedIsPercent, participants, lock_participants: lockParticipants })
             });
 
             if (response.ok) {
@@ -542,7 +551,7 @@
             return;
         }
 
-        if (!confirm(`⚠️ IRREVERSIBLE ACTION ⚠️\n\nThis will add ${currentGroup.default_participants.length} participants to ALL contests in this group.\n\nExisting participants will be merged with default participants.\n\nContinue?`)) {
+        if (!confirm(`⚠️ IRREVERSIBLE ACTION ⚠️\n\nThis will REPLACE participants in ALL contests with ${currentGroup.default_participants.length} default participants.\n\nExisting participants will be removed.\n\nContinue?`)) {
             return;
         }
 
@@ -566,15 +575,23 @@
     async function openEditGroupModal() {
         // Fetch available spreadsheets
         let spreadsheets = [];
+        let attendanceSpreadsheets = [];
         try {
             const response = await fetch('/api/spreadsheets');
-            spreadsheets = await response.json();
+            const allSheets = await response.json();
+            spreadsheets = allSheets.filter(s => s.spreadsheet_type !== 'attendance');
+            attendanceSpreadsheets = allSheets.filter(s => s.spreadsheet_type === 'attendance');
         } catch (e) {
             console.error('Failed to load spreadsheets', e);
         }
 
         const spreadsheetOptions = spreadsheets.map(s =>
             `<option value="${s.id}" ${currentGroup.spreadsheet_id === s.id ? 'selected' : ''}>${escapeHtml(s.name)}</option>`
+        ).join('');
+
+        const currentAttendanceIds = (currentGroup.attendance_spreadsheets || []).map(s => s.id);
+        const attendanceOptions = attendanceSpreadsheets.map(s =>
+            `<option value="${s.id}" ${currentAttendanceIds.includes(s.id) ? 'selected' : ''}>${escapeHtml(s.name)}</option>`
         ).join('');
 
         openModal('Edit Group', `
@@ -588,12 +605,19 @@
                     <textarea id="editGroupDescription" rows="3" placeholder="Group description">${escapeHtml(currentGroup.description || '')}</textarea>
                 </div>
                 <div class="form-group">
-                    <label for="editGroupSpreadsheet">Linked Spreadsheet</label>
+                    <label for="editGroupSpreadsheet">Participants Spreadsheet</label>
                     <select id="editGroupSpreadsheet">
                         <option value="">None (no participant links)</option>
                         ${spreadsheetOptions}
                     </select>
                     <small class="form-hint">Links participant handles to this spreadsheet</small>
+                </div>
+                <div class="form-group">
+                    <label for="editGroupAttendance">Attendance Spreadsheets</label>
+                    <select id="editGroupAttendance" multiple size="4">
+                        ${attendanceOptions}
+                    </select>
+                    <small class="form-hint">Select attendance sheets to track (Ctrl+click for multiple)</small>
                 </div>
                 <div class="form-actions">
                     <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
@@ -608,6 +632,8 @@
         const name = document.getElementById('editGroupName').value;
         const description = document.getElementById('editGroupDescription').value;
         const spreadsheetId = document.getElementById('editGroupSpreadsheet').value;
+        const attendanceSelect = document.getElementById('editGroupAttendance');
+        const attendanceIds = Array.from(attendanceSelect.selectedOptions).map(o => parseInt(o.value));
 
         try {
             const response = await fetch(`/api/groups/${currentGroupId}`, {
@@ -616,7 +642,8 @@
                 body: JSON.stringify({
                     name,
                     description,
-                    spreadsheet_id: spreadsheetId ? parseInt(spreadsheetId) : null
+                    spreadsheet_id: spreadsheetId ? parseInt(spreadsheetId) : null,
+                    attendance_spreadsheet_ids: attendanceIds
                 })
             });
 
@@ -628,6 +655,10 @@
                 closeModal();
                 showToast('Group updated!', 'success');
                 loadGroups(); // Refresh list too
+                // Reload overview if visible
+                if (document.getElementById('overviewContainer').style.display !== 'none') {
+                    loadGroupOverview();
+                }
             } else {
                 showToast('Failed to update group', 'error');
             }
@@ -730,6 +761,9 @@
     let selectedContests = new Set();
     let showPassesColumn = true;
     let showSolvedColumn = true;
+    let showAttendanceColumn = true;
+    let showPointsColumn = true;
+    let participantPhones = {};  // Cache for participant phone numbers
 
     async function loadGroupOverview() {
         const container = document.getElementById('overviewContainer');
@@ -773,8 +807,9 @@
 
         const container = document.getElementById('overviewContainer');
         const contests = overviewData.contests.filter(c => selectedContests.has(c.id));
+        const totalAttendance = overviewData.total_attendance_sheets || 0;
 
-        // Calculate stats for each participant
+        // Calculate stats for each participant (using data from server)
         const participantStats = overviewData.participants.map(p => {
             let passes = 0;
             let totalSolved = 0;
@@ -785,13 +820,17 @@
                     totalSolved += result.solved_count || 0;
                 }
             }
-            return { ...p, passes, totalSolved };
+            const attendance = p.attendance || 0;
+            // Points: (passes × 5) + (solved × 1) + (attendance × 1)
+            const points = (passes * 5) + (totalSolved * 1) + (attendance * 1);
+            return { ...p, passes, totalSolved, attendance, points };
         });
 
-        // Sort by passes (desc), then total solved (desc)
+        // Sort by passes (desc), then total solved (desc), then attendance (desc)
         participantStats.sort((a, b) => {
             if (b.passes !== a.passes) return b.passes - a.passes;
-            return b.totalSolved - a.totalSolved;
+            if (b.totalSolved !== a.totalSolved) return b.totalSolved - a.totalSolved;
+            return b.attendance - a.attendance;
         });
 
         // Build filter UI
@@ -815,6 +854,12 @@
                     <label class="checkbox-label" style="margin-left: 0.5rem;">
                         <input type="checkbox" ${showSolvedColumn ? 'checked' : ''} onchange="toggleSolvedColumn(this.checked)"> Solved
                     </label>
+                    <label class="checkbox-label" style="margin-left: 0.5rem;">
+                        <input type="checkbox" ${showAttendanceColumn ? 'checked' : ''} onchange="toggleAttendanceColumn(this.checked)"> Attendance
+                    </label>
+                    <label class="checkbox-label" style="margin-left: 0.5rem;">
+                        <input type="checkbox" ${showPointsColumn ? 'checked' : ''} onchange="togglePointsColumn(this.checked)"> Points
+                    </label>
                 </div>
             </div>
             <div class="overview-table-container">
@@ -825,6 +870,8 @@
                             <th class="handle-col">Handle</th>
                             ${showPassesColumn ? '<th class="stats-col">Passes</th>' : ''}
                             ${showSolvedColumn ? '<th class="stats-col">Solved</th>' : ''}
+                            ${showAttendanceColumn ? '<th class="stats-col">Attendance</th>' : ''}
+                            ${showPointsColumn ? '<th class="stats-col" title="Formula: (Passes × 5) + (Solved × 1) + (Attendance × 1)">Points</th>' : ''}
                             ${contests.map(c => `
                                 <th class="contest-col" title="${escapeHtml(c.name)}">
                                     <div class="contest-header">
@@ -845,16 +892,21 @@
             else if (rank === 2) { rowClass = 'rank-silver'; }
             else if (rank === 3) { rowClass = 'rank-bronze'; }
 
+            // Only show 📋 if participant is in spreadsheet
+            const showSpreadsheetBtn = currentGroup.spreadsheet && participant.in_spreadsheet;
+
             html += `<tr class="${rowClass}">
                 <td class="rank-col">${rank}</td>
                 <td class="handle-col">
-                    <a href="https://codeforces.com/profile/${participant.handle}" target="_blank" class="handle-link">
+                    <a href="javascript:void(0)" onclick="openHandleAction('${participant.handle}')" class="handle-link">
                         ${escapeHtml(participant.handle)}
                     </a>
-                    ${currentGroup.spreadsheet ? `<button class="spreadsheet-link" onclick="viewParticipantData('${participant.handle}')" title="View participant data">📋</button>` : ''}
+                    ${showSpreadsheetBtn ? `<button class="spreadsheet-link" onclick="viewParticipantData('${participant.handle}')" title="View participant data">📋</button>` : ''}
                 </td>
                 ${showPassesColumn ? `<td class="stats-col">${participant.passes}</td>` : ''}
-                ${showSolvedColumn ? `<td class="stats-col">${participant.totalSolved}</td>` : ''}`;
+                ${showSolvedColumn ? `<td class="stats-col">${participant.totalSolved}</td>` : ''}
+                ${showAttendanceColumn ? `<td class="stats-col">${participant.attendance}/${totalAttendance}</td>` : ''}
+                ${showPointsColumn ? `<td class="stats-col">${participant.points}</td>` : ''}`;
 
             for (const contest of contests) {
                 const result = participant.results[contest.id];
@@ -916,6 +968,16 @@
         renderOverview();
     }
 
+    function toggleAttendanceColumn(show) {
+        showAttendanceColumn = show;
+        renderOverview();
+    }
+
+    function togglePointsColumn(show) {
+        showPointsColumn = show;
+        renderOverview();
+    }
+
     // Quick Refresh Contest
     async function quickRefresh(contestId, event) {
         event.stopPropagation();
@@ -958,7 +1020,15 @@
                 return;
             }
 
+            // Cache phone number for this participant
+            const phoneCol = currentGroup.spreadsheet.phone_column;
+            if (phoneCol && data[phoneCol]) {
+                participantPhones[handle.toLowerCase()] = data[phoneCol];
+            }
+
             let html = '<div class="participant-data">';
+            // Add Codeforces profile link at the top
+            html += `<div class="info-row"><span class="info-label">Codeforces</span><span class="info-value"><a href="https://codeforces.com/profile/${handle}" target="_blank" class="handle-link">View Profile →</a></span></div>`;
             for (const [key, value] of Object.entries(data)) {
                 html += `<div class="info-row"><span class="info-label">${escapeHtml(key)}</span><span class="info-value">${escapeHtml(value)}</span></div>`;
             }
@@ -969,6 +1039,56 @@
         } catch (error) {
             showToast('Failed to load participant data', 'error');
         }
+    }
+
+    // Format phone number with Egypt country code
+    function formatEgyptPhone(phone) {
+        let digits = phone.replace(/[^0-9]/g, '');
+        // If starts with 0, replace with Egypt code
+        if (digits.startsWith('0')) {
+            digits = '20' + digits.substring(1);
+        }
+        // If doesn't start with 20, add it
+        if (!digits.startsWith('20')) {
+            digits = '20' + digits;
+        }
+        return digits;
+    }
+
+    async function openHandleAction(handle) {
+        // Check if we have a cached phone number
+        if (participantPhones[handle.toLowerCase()]) {
+            const phone = formatEgyptPhone(participantPhones[handle.toLowerCase()]);
+            if (phone) {
+                window.open(`https://wa.me/${phone}`, '_blank');
+                return;
+            }
+        }
+
+        // If spreadsheet exists, try to fetch phone number
+        if (currentGroup.spreadsheet) {
+            try {
+                const response = await fetch(`/api/spreadsheets/${currentGroup.spreadsheet.id}/participant/${handle}`);
+                const data = await response.json();
+
+                if (!data.error) {
+                    const phoneCol = currentGroup.spreadsheet.phone_column;
+                    if (phoneCol && data[phoneCol]) {
+                        const phone = formatEgyptPhone(data[phoneCol]);
+                        participantPhones[handle.toLowerCase()] = data[phoneCol];
+                        if (phone) {
+                            window.open(`https://wa.me/${phone}`, '_blank');
+                            return;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.log('Could not fetch participant phone');
+            }
+        }
+
+        // Fallback to Codeforces profile
+        window.open(`https://codeforces.com/profile/${handle}`, '_blank');
     }
 </script>
 {% endblock %}

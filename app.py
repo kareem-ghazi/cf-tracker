@@ -94,6 +94,13 @@ def update_group(group_id):
             group.default_participants = data['default_participants']
     if 'spreadsheet_id' in data:
         group.spreadsheet_id = data['spreadsheet_id'] if data['spreadsheet_id'] else None
+    if 'attendance_spreadsheet_ids' in data:
+        # Update attendance spreadsheets (many-to-many)
+        group.attendance_spreadsheets.clear()
+        for sheet_id in data['attendance_spreadsheet_ids']:
+            sheet = Spreadsheet.query.get(sheet_id)
+            if sheet:
+                group.attendance_spreadsheets.append(sheet)
     
     db.session.commit()
     return jsonify(group.to_dict())
@@ -121,10 +128,8 @@ def apply_group_participants(group_id):
     updated_count = 0
     
     for contest in contests:
-        # Merge existing participants with default participants
-        existing = set(contest.get_participants_list())
-        new_participants = list(existing.union(set(default_participants)))
-        contest.set_participants_list(new_participants)
+        # Replace with default participants
+        contest.set_participants_list(default_participants)
         updated_count += 1
     
     db.session.commit()
@@ -142,8 +147,12 @@ def apply_group_participants(group_id):
 
 @app.route('/api/spreadsheets', methods=['GET'])
 def get_spreadsheets():
-    """Get all spreadsheets."""
-    spreadsheets = Spreadsheet.query.order_by(Spreadsheet.created_at.desc()).all()
+    """Get all spreadsheets, optionally filtered by type."""
+    spreadsheet_type = request.args.get('type')  # Optional filter by type
+    query = Spreadsheet.query
+    if spreadsheet_type:
+        query = query.filter_by(spreadsheet_type=spreadsheet_type)
+    spreadsheets = query.order_by(Spreadsheet.created_at.desc()).all()
     return jsonify([s.to_dict() for s in spreadsheets])
 
 
@@ -159,6 +168,8 @@ def create_spreadsheet():
     file = request.files['file']
     name = request.form.get('name', file.filename)
     handle_column = request.form.get('handle_column', 'Codeforces Handle')
+    phone_column = request.form.get('phone_column', '')
+    spreadsheet_type = request.form.get('spreadsheet_type', 'participants')
     
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
@@ -173,7 +184,9 @@ def create_spreadsheet():
         spreadsheet = Spreadsheet(
             name=name,
             filename=file.filename,
-            handle_column=handle_column
+            handle_column=handle_column,
+            phone_column=phone_column,
+            spreadsheet_type=spreadsheet_type
         )
         spreadsheet.set_data({'columns': columns, 'rows': rows})
         db.session.add(spreadsheet)
@@ -228,6 +241,8 @@ def update_spreadsheet(spreadsheet_id):
             spreadsheet.name = data['name']
         if data.get('handle_column'):
             spreadsheet.handle_column = data['handle_column']
+        if 'phone_column' in data:
+            spreadsheet.phone_column = data['phone_column']
     # Handle file re-upload
     elif 'file' in request.files:
         import csv
@@ -235,6 +250,7 @@ def update_spreadsheet(spreadsheet_id):
         
         file = request.files['file']
         handle_column = request.form.get('handle_column', spreadsheet.handle_column)
+        phone_column = request.form.get('phone_column', spreadsheet.phone_column)
         
         try:
             content = file.read().decode('utf-8')
@@ -244,6 +260,7 @@ def update_spreadsheet(spreadsheet_id):
             
             spreadsheet.filename = file.filename
             spreadsheet.handle_column = handle_column
+            spreadsheet.phone_column = phone_column
             spreadsheet.set_data({'columns': columns, 'rows': rows})
         except Exception as e:
             return jsonify({'error': f'Failed to parse file: {str(e)}'}), 400
@@ -276,8 +293,32 @@ def get_group_overview(group_id):
         return jsonify({
             'group': group.to_dict(),
             'contests': [],
-            'participants': []
+            'participants': [],
+            'total_attendance_sheets': len(group.attendance_spreadsheets)
         })
+    
+    # Build attendance lookup: handle -> count of sheets they appear in
+    attendance_lookup = {}
+    total_attendance_sheets = len(group.attendance_spreadsheets)
+    for sheet in group.attendance_spreadsheets:
+        data = sheet.get_data()
+        rows = data.get('rows', [])
+        handle_col = sheet.handle_column
+        for row in rows:
+            handle = row.get(handle_col, '').strip().lower()
+            if handle:
+                attendance_lookup[handle] = attendance_lookup.get(handle, 0) + 1
+    
+    # Build set of all handles in participants spreadsheet (for 📋 button)
+    spreadsheet_handles = set()
+    if group.spreadsheet:
+        data = group.spreadsheet.get_data()
+        rows = data.get('rows', [])
+        handle_col = group.spreadsheet.handle_column
+        for row in rows:
+            handle = row.get(handle_col, '').strip().lower()
+            if handle:
+                spreadsheet_handles.add(handle)
     
     # Collect all unique participants across all contests
     all_handles = set()
@@ -289,9 +330,12 @@ def get_group_overview(group_id):
     # Build participant data with results for each contest
     participants = []
     for handle in sorted(all_handles, key=str.lower):
+        total_passes = 0
+        total_solved = 0
         participant_data = {
             'handle': handle,
-            'results': {}
+            'results': {},
+            'in_spreadsheet': handle.lower() in spreadsheet_handles
         }
         
         for contest in contests:
@@ -306,6 +350,20 @@ def get_group_overview(group_id):
                     'participated': result.participated,
                     'rank': result.rank
                 }
+                if result.passed:
+                    total_passes += 1
+                total_solved += result.solved_count
+        
+        # Add attendance tracking
+        attendance = attendance_lookup.get(handle.lower(), 0)
+        participant_data['attendance'] = attendance
+        participant_data['total_attendance_sheets'] = total_attendance_sheets
+        
+        # Calculate points: (passes × 5) + (solved × 1) + (attendance × 1)
+        points = (total_passes * 5) + (total_solved * 1) + (attendance * 1)
+        participant_data['points'] = points
+        participant_data['total_passes'] = total_passes
+        participant_data['total_solved'] = total_solved
         
         participants.append(participant_data)
     
@@ -324,7 +382,8 @@ def get_group_overview(group_id):
     return jsonify({
         'group': group.to_dict(),
         'contests': contest_data,
-        'participants': participants
+        'participants': participants,
+        'total_attendance_sheets': total_attendance_sheets
     })
 
 
@@ -427,6 +486,8 @@ def update_contest(contest_id):
         contest.min_solved = data['min_solved']
     if 'min_solved_is_percent' in data:
         contest.min_solved_is_percent = data['min_solved_is_percent']
+    if 'lock_participants' in data:
+        contest.lock_participants = data['lock_participants']
     if 'participants' in data:
         if isinstance(data['participants'], list):
             contest.set_participants_list(data['participants'])
@@ -454,6 +515,32 @@ def delete_contest(contest_id):
 def refresh_contest_results(contest_id):
     """Refresh contest results from Codeforces API."""
     contest = Contest.query.get_or_404(contest_id)
+    
+    # Fetch standings from Codeforces first (get full standings for all participants)
+    standings = cf_api.get_contest_standings(contest.cf_contest_id)
+    
+    if not standings.get('success'):
+        return jsonify({'error': f"Failed to fetch standings: {standings.get('error')}"}), 400
+    
+    # Auto-update participants from Codeforces if not locked
+    if not contest.lock_participants:
+        # Get all handles from the contest standings
+        rows = standings.get('result', {}).get('rows', [])
+        cf_handles = set()
+        for row in rows:
+            party = row.get('party', {})
+            members = party.get('members', [])
+            for member in members:
+                handle = member.get('handle', '')
+                if handle:
+                    cf_handles.add(handle)
+        
+        # Merge with existing participants (add new ones from CF)
+        existing = set(contest.get_participants_list())
+        new_participants = list(existing.union(cf_handles))
+        if len(new_participants) > len(existing):
+            contest.set_participants_list(new_participants)
+    
     participants = contest.get_participants_list()
     
     if not participants:
@@ -462,12 +549,6 @@ def refresh_contest_results(contest_id):
     # Clear old results
     CachedResult.query.filter_by(contest_id=contest_id).delete()
     db.session.commit()
-    
-    # Fetch standings from Codeforces (get full standings for all participants)
-    standings = cf_api.get_contest_standings(contest.cf_contest_id)
-    
-    if not standings.get('success'):
-        return jsonify({'error': f"Failed to fetch standings: {standings.get('error')}"}), 400
     
     # Update total problems count
     problems = standings.get('result', {}).get('problems', [])
@@ -702,4 +783,4 @@ def search_codeforces_contests():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5000, host='0.0.0.0')

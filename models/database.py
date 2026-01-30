@@ -17,7 +17,9 @@ class Spreadsheet(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     filename = db.Column(db.String(255), default='')  # Original filename
+    spreadsheet_type = db.Column(db.String(20), default='participants')  # 'participants' or 'attendance'
     handle_column = db.Column(db.String(50), default='Codeforces Handle')  # Column name for CF handles
+    phone_column = db.Column(db.String(50), default='WhatsApp Number')  # Column name for phone numbers
     data = db.Column(db.Text, default='{}')  # JSON-stored spreadsheet data
     created_at = db.Column(db.DateTime, default=utc_now)
     
@@ -54,12 +56,21 @@ class Spreadsheet(db.Model):
             'id': self.id,
             'name': self.name,
             'filename': self.filename,
+            'spreadsheet_type': self.spreadsheet_type,
             'handle_column': self.handle_column,
+            'phone_column': self.phone_column,
             'columns': data.get('columns', []),
             'row_count': len(data.get('rows', [])),
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'group_count': len(self.groups)
         }
+
+
+# Association table for Group <-> Attendance Spreadsheets (many-to-many)
+group_attendance = db.Table('group_attendance',
+    db.Column('group_id', db.Integer, db.ForeignKey('groups.id'), primary_key=True),
+    db.Column('spreadsheet_id', db.Integer, db.ForeignKey('spreadsheets.id'), primary_key=True)
+)
 
 
 class Group(db.Model):
@@ -75,6 +86,8 @@ class Group(db.Model):
     
     # Relationships
     contests = db.relationship('Contest', backref='group', lazy=True, cascade='all, delete-orphan')
+    attendance_spreadsheets = db.relationship('Spreadsheet', secondary='group_attendance', lazy='subquery',
+                                               backref=db.backref('attendance_groups', lazy=True))
     
     def get_default_participants_list(self):
         """Get default participants as a list."""
@@ -95,6 +108,7 @@ class Group(db.Model):
             'default_participants': self.get_default_participants_list(),
             'spreadsheet_id': self.spreadsheet_id,
             'spreadsheet': self.spreadsheet.to_dict() if self.spreadsheet else None,
+            'attendance_spreadsheets': [s.to_dict() for s in self.attendance_spreadsheets],
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'contest_count': len(self.contests)
         }
@@ -111,6 +125,7 @@ class Contest(db.Model):
     min_solved = db.Column(db.Integer, default=1)  # Minimum problems to pass (or percentage if is_percent)
     min_solved_is_percent = db.Column(db.Boolean, default=False)  # If True, min_solved is a percentage
     participants = db.Column(db.Text, default='')  # Comma-separated handles
+    lock_participants = db.Column(db.Boolean, default=False)  # If True, don't auto-update from spreadsheet
     added_at = db.Column(db.DateTime, default=utc_now)
     total_problems = db.Column(db.Integer, default=0)  # Total problems in contest (for percentage calc)
     start_date = db.Column(db.DateTime, nullable=True)  # When the contest started on Codeforces
@@ -148,6 +163,7 @@ class Contest(db.Model):
             'total_problems': self.total_problems,
             'required_solved': self.get_required_solved(),
             'participants': self.get_participants_list(),
+            'lock_participants': self.lock_participants,
             'added_at': self.added_at.isoformat() if self.added_at else None,
             'start_date': self.start_date.isoformat() if self.start_date else None,
             'last_refreshed': self.last_refreshed.isoformat() if self.last_refreshed else None,

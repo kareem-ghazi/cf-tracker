@@ -168,6 +168,8 @@
     let allResults = [];
     let progressChart = null;
     let spreadsheetId = null;
+    let phoneColumn = null;  // Phone column name from spreadsheet
+    let participantPhones = {};  // Cache for participant phone numbers
 
     document.addEventListener('DOMContentLoaded', async function () {
         // Fetch group info to get spreadsheet URL
@@ -176,6 +178,7 @@
             const group = await response.json();
             if (group.spreadsheet) {
                 spreadsheetId = group.spreadsheet.id;
+                phoneColumn = group.spreadsheet.phone_column || null;
             }
         } catch (e) {
             console.log('Could not fetch group info for spreadsheet link');
@@ -274,7 +277,7 @@
                 <tr class="${rowClass}">
                     <td>${index + 1}</td>
                     <td>
-                        <a href="https://codeforces.com/profile/${result.handle}" target="_blank" class="handle-link">
+                        <a href="javascript:void(0)" onclick="openHandleAction('${result.handle}')" class="handle-link">
                             ${escapeHtml(result.handle)}
                         </a>
                         ${spreadsheetId ? `<button class="spreadsheet-link" onclick="viewParticipantData('${result.handle}')" title="View participant data">📋</button>` : ''}
@@ -344,7 +347,7 @@
                     <tr class="${rowClass}">
                         <td>${rankDisplay}</td>
                         <td>
-                            <a href="https://codeforces.com/profile/${result.handle}" target="_blank" class="handle-link">
+                            <a href="javascript:void(0)" onclick="openHandleAction('${result.handle}')" class="handle-link">
                                 ${escapeHtml(result.handle)}
                             </a>
                             ${spreadsheetId ? `<button class="spreadsheet-link" onclick="viewParticipantData('${result.handle}')" title="View participant data">📋</button>` : ''}
@@ -573,6 +576,13 @@
                             </div>
                             <small class="form-hint">Total problems: ${contest.total_problems || 'Unknown'}</small>
                         </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="editLockParticipants" ${contest.lock_participants ? 'checked' : ''}>
+                                Lock Participants
+                            </label>
+                            <small class="form-hint">When checked, participants won't be auto-updated from the spreadsheet during refresh</small>
+                        </div>
                         <div class="form-actions">
                             <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
                             <button type="submit" class="btn btn-primary">Save Settings</button>
@@ -587,12 +597,13 @@
         const name = document.getElementById('editContestName').value;
         const minSolved = parseInt(document.getElementById('editMinSolved').value);
         const minSolvedIsPercent = document.getElementById('editMinSolvedIsPercent').checked;
+        const lockParticipants = document.getElementById('editLockParticipants').checked;
 
         try {
             const response = await fetch(`/api/contests/${contestId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, min_solved: minSolved, min_solved_is_percent: minSolvedIsPercent })
+                body: JSON.stringify({ name, min_solved: minSolved, min_solved_is_percent: minSolvedIsPercent, lock_participants: lockParticipants })
             });
 
             if (response.ok) {
@@ -623,7 +634,14 @@
                 return;
             }
 
+            // Cache phone number for this participant
+            if (phoneColumn && data[phoneColumn]) {
+                participantPhones[handle.toLowerCase()] = data[phoneColumn];
+            }
+
             let html = '<div class="participant-data">';
+            // Add Codeforces profile link at the top
+            html += `<div class="info-row"><span class="info-label">Codeforces</span><span class="info-value"><a href="https://codeforces.com/profile/${handle}" target="_blank" class="handle-link">View Profile →</a></span></div>`;
             for (const [key, value] of Object.entries(data)) {
                 html += `<div class="info-row"><span class="info-label">${escapeHtml(key)}</span><span class="info-value">${escapeHtml(value)}</span></div>`;
             }
@@ -634,6 +652,55 @@
         } catch (error) {
             showToast('Failed to load participant data', 'error');
         }
+    }
+
+    // Format phone number with Egypt country code
+    function formatEgyptPhone(phone) {
+        let digits = phone.replace(/[^0-9]/g, '');
+        // If starts with 0, replace with Egypt code
+        if (digits.startsWith('0')) {
+            digits = '20' + digits.substring(1);
+        }
+        // If doesn't start with 20, add it
+        if (!digits.startsWith('20')) {
+            digits = '20' + digits;
+        }
+        return digits;
+    }
+
+    async function openHandleAction(handle) {
+        // Check if we have a cached phone number
+        if (participantPhones[handle.toLowerCase()]) {
+            const phone = formatEgyptPhone(participantPhones[handle.toLowerCase()]);
+            if (phone) {
+                window.open(`https://wa.me/${phone}`, '_blank');
+                return;
+            }
+        }
+
+        // If spreadsheet exists, try to fetch phone number
+        if (spreadsheetId) {
+            try {
+                const response = await fetch(`/api/spreadsheets/${spreadsheetId}/participant/${handle}`);
+                const data = await response.json();
+
+                if (!data.error) {
+                    if (phoneColumn && data[phoneColumn]) {
+                        const phone = formatEgyptPhone(data[phoneColumn]);
+                        participantPhones[handle.toLowerCase()] = data[phoneColumn];
+                        if (phone) {
+                            window.open(`https://wa.me/${phone}`, '_blank');
+                            return;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.log('Could not fetch participant phone');
+            }
+        }
+
+        // Fallback to Codeforces profile
+        window.open(`https://codeforces.com/profile/${handle}`, '_blank');
     }
 </script>
 {% endblock %}

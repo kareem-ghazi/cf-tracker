@@ -182,28 +182,53 @@
         }
     }
 
-    async function viewSpreadsheet(id) {
+    // Track hide duplicates state per spreadsheet viewer
+    let viewerHideDuplicates = false;
+    let currentViewingSpreadsheetId = null;
+
+    async function viewSpreadsheet(id, hideDuplicates = false) {
+        currentViewingSpreadsheetId = id;
+        viewerHideDuplicates = hideDuplicates;
+
         try {
-            const response = await fetch(`/api/spreadsheets/${id}/data`);
+            const url = `/api/spreadsheets/${id}/data${hideDuplicates ? '?hide_duplicates=true' : ''}`;
+            const response = await fetch(url);
             const data = await response.json();
 
-            let tableHtml = '<div class="spreadsheet-preview"><table class="data-table"><thead><tr>';
+            let toolbarHtml = `
+                <div class="sheet-viewer-toolbar">
+                    <div class="search-bar-container">
+                        <input type="search" id="sheetSearchInput" class="search-input" placeholder="🔍 Search rows..." oninput="filterSheetRows()">
+                    </div>
+                    <div class="toolbar-actions">
+                        <label class="checkbox-label" style="font-size: 0.85rem;">
+                            <input type="checkbox" id="hideDuplicatesToggle" ${hideDuplicates ? 'checked' : ''} onchange="viewSpreadsheet(${id}, this.checked)">
+                            Hide Duplicates
+                        </label>
+                        <button class="btn btn-ghost btn-sm" onclick="exportStatistics(${id}, 'csv')" title="Export sheet statistics as CSV">📥 CSV</button>
+                        <button class="btn btn-ghost btn-sm" onclick="exportStatistics(${id}, 'json')" title="Export sheet statistics as JSON">📥 JSON</button>
+                        ${data.total_rows !== data.displayed_rows ? `<span class="badge" style="margin-left: 0.5rem;">Showing ${data.displayed_rows} of ${data.total_rows}</span>` : ''}
+                    </div>
+                </div>
+            `;
+
+            let tableHtml = toolbarHtml + '<div class="spreadsheet-preview"><table class="data-table" id="sheetDataTable"><thead><tr>';
             for (const col of data.columns) {
                 tableHtml += `<th>${escapeHtml(col)}</th>`;
             }
             tableHtml += '</tr></thead><tbody>';
 
-            const maxRows = Math.min(data.rows.length, 50);
+            const maxRows = Math.min(data.rows.length, 100);
             for (let i = 0; i < maxRows; i++) {
-                tableHtml += '<tr>';
+                tableHtml += '<tr class="sheet-data-row">';
                 for (const col of data.columns) {
                     tableHtml += `<td>${escapeHtml(data.rows[i][col] || '')}</td>`;
                 }
                 tableHtml += '</tr>';
             }
             tableHtml += '</tbody></table>';
-            if (data.rows.length > 50) {
-                tableHtml += `<p class="hint">Showing first 50 of ${data.rows.length} rows</p>`;
+            if (data.rows.length > 100) {
+                tableHtml += `<p class="hint">Showing first 100 of ${data.rows.length} rows</p>`;
             }
             tableHtml += '</div>';
 
@@ -212,6 +237,16 @@
         } catch (error) {
             showToast('Failed to load spreadsheet data', 'error');
         }
+    }
+
+    function filterSheetRows() {
+        const searchValue = document.getElementById('sheetSearchInput').value.toLowerCase().trim();
+        const rows = document.querySelectorAll('#sheetDataTable tbody .sheet-data-row');
+
+        rows.forEach(row => {
+            const text = row.textContent.toLowerCase();
+            row.style.display = text.includes(searchValue) ? '' : 'none';
+        });
     }
 
     function openEditSpreadsheetModal(id) {
@@ -310,6 +345,16 @@
             }
         } catch (error) {
             showToast('Failed to delete spreadsheet', 'error');
+        }
+    }
+
+    function exportStatistics(id, format) {
+        if (format === 'csv') {
+            // Direct download
+            window.location.href = `/api/spreadsheets/${id}/statistics?format=csv`;
+        } else {
+            // JSON: open in new tab or download
+            window.open(`/api/spreadsheets/${id}/statistics?format=json`, '_blank');
         }
     }
 </script>

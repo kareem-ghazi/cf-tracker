@@ -89,11 +89,24 @@
                     <option value="not_participated">Not Entered</option>
                 </select>
             </div>
+            <div class="search-bar-container">
+                <input type="search" id="resultSearchInput" class="search-input" placeholder="🔍 Search participants..." oninput="applyFilter()">
+            </div>
             <div class="export-group">
                 <button class="btn btn-secondary btn-sm" onclick="exportResults('all')">📋 Export All</button>
                 <button class="btn btn-success btn-sm" onclick="exportResults('passed')">📋 Export Passed</button>
                 <button class="btn btn-warning btn-sm" onclick="exportResults('failed')">📋 Export Failed</button>
+                <button class="btn btn-secondary btn-sm" onclick="exportContestFile('csv')">📥 CSV</button>
+                <button class="btn btn-secondary btn-sm" onclick="exportContestFile('json')">📥 JSON</button>
             </div>
+        </div>
+
+        <div class="export-result" id="exportResult" style="display: none;">
+            <div class="export-header">
+                <h3>Exported Handles</h3>
+                <button class="btn btn-sm" onclick="copyExport()">📋 Copy</button>
+            </div>
+            <textarea id="exportText" readonly rows="4"></textarea>
         </div>
 
         <!-- Results Table -->
@@ -118,6 +131,11 @@
 
     <!-- Standings View -->
     <div class="view-container" id="viewStandings" style="display: none;">
+        <div class="results-toolbar">
+            <div class="search-bar-container">
+                <input type="search" id="standingsSearchInput" class="search-input" placeholder="🔍 Search participants..." oninput="filterStandings()">
+            </div>
+        </div>
         <div class="results-table-container">
             <table class="data-table" id="standingsTable">
                 <thead>
@@ -149,14 +167,6 @@
         </div>
     </div>
 
-    <!-- Export Modal -->
-    <div class="export-result" id="exportResult" style="display: none;">
-        <div class="export-header">
-            <h3>Exported Handles</h3>
-            <button class="btn btn-sm" onclick="copyExport()">📋 Copy</button>
-        </div>
-        <textarea id="exportText" readonly rows="4"></textarea>
-    </div>
 </div>
 {% endblock %}
 
@@ -166,6 +176,7 @@
     const contestId = {{ contest.id }};
     const groupId = {{ contest.group_id }};
     let allResults = [];
+    let allStandings = [];
     let progressChart = null;
     let spreadsheetId = null;
     let phoneColumn = null;  // Phone column name from spreadsheet
@@ -291,6 +302,7 @@
 
     function applyFilter() {
         const filter = document.getElementById('resultFilter').value;
+        const searchValue = document.getElementById('resultSearchInput').value.toLowerCase().trim();
 
         let filtered = allResults;
         if (filter === 'passed') {
@@ -301,6 +313,10 @@
             filtered = allResults.filter(r => r.participated);
         } else if (filter === 'not_participated') {
             filtered = allResults.filter(r => !r.participated);
+        }
+
+        if (searchValue) {
+            filtered = filtered.filter(r => r.handle.toLowerCase().includes(searchValue));
         }
 
         renderResults(filtered);
@@ -318,14 +334,33 @@
                 return;
             }
 
-            const standings = data.standings;
+            allStandings = data.standings;
 
-            if (standings.length === 0) {
+            if (allStandings.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">No standings data. Refresh results first.</td></tr>';
                 return;
             }
 
-            tbody.innerHTML = standings.map((result, index) => {
+            renderStandings();
+
+        } catch (error) {
+            console.error('Error loading standings:', error);
+            tbody.innerHTML = '<tr><td colspan="4" class="error-cell">Failed to load standings.</td></tr>';
+        }
+    }
+
+    function filterStandings() {
+        renderStandings();
+    }
+
+    function renderStandings() {
+        const tbody = document.getElementById('standingsTableBody');
+        const searchValue = document.getElementById('standingsSearchInput').value.toLowerCase().trim();
+        const standings = searchValue
+            ? allStandings.filter(result => result.handle.toLowerCase().includes(searchValue))
+            : allStandings;
+
+        tbody.innerHTML = standings.map((result, index) => {
                 let rowClass = result.participated ? '' : 'row-not-participated';
                 let rankDisplay = result.participated && result.rank > 0 ? result.rank : '-';
                 let statusBadge = '';
@@ -356,12 +391,7 @@
                         <td>${statusBadge}</td>
                     </tr>
                 `;
-            }).join('');
-
-        } catch (error) {
-            console.error('Error loading standings:', error);
-            tbody.innerHTML = '<tr><td colspan="4" class="error-cell">Failed to load standings.</td></tr>';
-        }
+        }).join('');
     }
 
     async function loadProgress() {
@@ -498,6 +528,10 @@
         } catch (error) {
             showToast('Failed to export results', 'error');
         }
+    }
+
+    function exportContestFile(format) {
+        window.location.href = `/api/contests/${contestId}/export?format=${format}`;
     }
 
     function copyExport() {
@@ -654,24 +688,22 @@
         }
     }
 
-    // Format phone number with Egypt country code
-    function formatEgyptPhone(phone) {
-        let digits = phone.replace(/[^0-9]/g, '');
-        // If starts with 0, replace with Egypt code
-        if (digits.startsWith('0')) {
+    // Format phone number: if starts with 010 it's Egyptian, otherwise keep as-is from CSV
+    function formatPhoneNumber(phone) {
+        let digits = phone.replace(/[^0-9+]/g, '');
+        // If starts with 010, 011, 012, 015 (Egyptian mobile prefixes), apply Egypt code
+        if (/^0(10|11|12|15)/.test(digits)) {
             digits = '20' + digits.substring(1);
         }
-        // If doesn't start with 20, add it
-        if (!digits.startsWith('20')) {
-            digits = '20' + digits;
-        }
+        // Remove leading + if present (wa.me expects digits only)
+        digits = digits.replace(/^\+/, '');
         return digits;
     }
 
     async function openHandleAction(handle) {
         // Check if we have a cached phone number
         if (participantPhones[handle.toLowerCase()]) {
-            const phone = formatEgyptPhone(participantPhones[handle.toLowerCase()]);
+            const phone = formatPhoneNumber(participantPhones[handle.toLowerCase()]);
             if (phone) {
                 window.open(`https://wa.me/${phone}`, '_blank');
                 return;
@@ -686,7 +718,7 @@
 
                 if (!data.error) {
                     if (phoneColumn && data[phoneColumn]) {
-                        const phone = formatEgyptPhone(data[phoneColumn]);
+                        const phone = formatPhoneNumber(data[phoneColumn]);
                         participantPhones[handle.toLowerCase()] = data[phoneColumn];
                         if (phone) {
                             window.open(`https://wa.me/${phone}`, '_blank');

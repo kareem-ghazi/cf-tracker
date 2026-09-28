@@ -36,12 +36,13 @@
                     <button class="btn btn-primary btn-sm" onclick="openAddContestModal()">➕ Add</button>
                     <button class="btn btn-info btn-sm" onclick="openBatchAddModal()">📦 Batch</button>
                 </div>
+                <!-- Export -->
+                <button class="btn btn-success btn-sm" onclick="exportGroupCSV()" title="Export group data as CSV">📥 Export CSV</button>
                 <!-- Danger -->
                 <button class="btn btn-danger btn-sm" onclick="confirmDeleteGroup()">🗑️</button>
             </div>
         </div>
         <p class="group-description" id="groupDetailDescription"></p>
-
         <!-- View Tabs -->
         <div class="view-tabs" style="margin-bottom: 1rem;">
             <button class="tab-btn active" onclick="switchGroupView('contests')" id="tabContests">🏆 Contests</button>
@@ -836,6 +837,9 @@
         // Build filter UI
         let html = `
             <div class="overview-filters">
+                <div class="search-bar-container" style="margin-bottom: 0.75rem;">
+                    <input type="search" id="overviewSearchInput" class="search-input" placeholder="🔍 Search participants..." oninput="filterOverviewRows()">
+                </div>
                 <label class="filter-label">Filter Contests:</label>
                 <div class="filter-chips">
                     <button class="chip ${selectedContests.size === overviewData.contests.length ? 'active' : ''}" onclick="toggleAllContests(true)">All</button>
@@ -978,6 +982,24 @@
         renderOverview();
     }
 
+    function filterOverviewRows() {
+        const searchValue = document.getElementById('overviewSearchInput').value.toLowerCase().trim();
+        const rows = document.querySelectorAll('.overview-table tbody tr');
+
+        rows.forEach(row => {
+            const handleCell = row.querySelector('.handle-col');
+            if (handleCell) {
+                const handle = handleCell.textContent.toLowerCase();
+                row.style.display = handle.includes(searchValue) ? '' : 'none';
+            }
+        });
+    }
+
+    function exportGroupCSV() {
+        if (!currentGroupId) return;
+        window.location.href = `/api/groups/${currentGroupId}/export-csv`;
+    }
+
     // Quick Refresh Contest
     async function quickRefresh(contestId, event) {
         event.stopPropagation();
@@ -1041,24 +1063,19 @@
         }
     }
 
-    // Format phone number with Egypt country code
-    function formatEgyptPhone(phone) {
-        let digits = phone.replace(/[^0-9]/g, '');
-        // If starts with 0, replace with Egypt code
-        if (digits.startsWith('0')) {
-            digits = '20' + digits.substring(1);
+    // Format phone number: if starts with 010 it's Egyptian, otherwise keep as-is from CSV
+    function formatPhoneNumber(phone) {
+        const value = String(phone || '').trim();
+        if (value.startsWith('010')) {
+            return '20' + value.substring(1).replace(/[^0-9]/g, '');
         }
-        // If doesn't start with 20, add it
-        if (!digits.startsWith('20')) {
-            digits = '20' + digits;
-        }
-        return digits;
+        return value;
     }
 
     async function openHandleAction(handle) {
         // Check if we have a cached phone number
         if (participantPhones[handle.toLowerCase()]) {
-            const phone = formatEgyptPhone(participantPhones[handle.toLowerCase()]);
+            const phone = formatPhoneNumber(participantPhones[handle.toLowerCase()]);
             if (phone) {
                 window.open(`https://wa.me/${phone}`, '_blank');
                 return;
@@ -1074,7 +1091,7 @@
                 if (!data.error) {
                     const phoneCol = currentGroup.spreadsheet.phone_column;
                     if (phoneCol && data[phoneCol]) {
-                        const phone = formatEgyptPhone(data[phoneCol]);
+                        const phone = formatPhoneNumber(data[phoneCol]);
                         participantPhones[handle.toLowerCase()] = data[phoneCol];
                         if (phone) {
                             window.open(`https://wa.me/${phone}`, '_blank');

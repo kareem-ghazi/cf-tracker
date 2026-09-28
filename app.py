@@ -1,6 +1,11 @@
 """Main Flask application for Codeforces Tracker."""
+import csv
+import io
+import json
+import re
+import unicodedata
 from datetime import datetime, timezone, date
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 from config import Config
 from models.database import db, init_db, Group, Contest, CachedResult, FetchHistory, Spreadsheet
 from api.codeforces import cf_api
@@ -44,6 +49,43 @@ def spreadsheets_page():
 # ============================================================================
 # API Routes - Groups
 # ============================================================================
+
+def normalize_identity_value(value):
+    """Normalize names, handles, and other identity values for CSV matching."""
+    value = unicodedata.normalize('NFKC', str(value or '')).strip().casefold()
+    return re.sub(r'\s+', ' ', re.sub(r'[^\w]+', ' ', value, flags=re.UNICODE)).strip()
+
+
+def get_group_attendance_lookup(group):
+    """Map participant handles to attendance sheets using any shared identity field."""
+    identity_to_handles = {}
+    if group.spreadsheet:
+        participant_data = group.spreadsheet.get_data()
+        handle_column = group.spreadsheet.handle_column
+        for row in participant_data.get('rows', []):
+            handle = normalize_identity_value(row.get(handle_column, ''))
+            if not handle:
+                continue
+            for value in row.values():
+                identity = normalize_identity_value(value)
+                if identity:
+                    identity_to_handles.setdefault(identity, set()).add(handle)
+
+    attendance_lookup = {}
+    for sheet in group.attendance_spreadsheets:
+        sheet_data = sheet.get_data()
+        seen_in_sheet = set()
+        for row in sheet_data.get('rows', []):
+            matched_handles = set()
+            for value in row.values():
+                identity = normalize_identity_value(value)
+                if identity in identity_to_handles:
+                    matched_handles.update(identity_to_handles[identity])
+            if len(matched_handles) == 1:
+                seen_in_sheet.update(matched_handles)
+        for handle in seen_in_sheet:
+            attendance_lookup[handle] = attendance_lookup.get(handle, 0) + 1
+    return attendance_lookup
 
 @app.route('/api/groups', methods=['GET'])
 def get_groups():
@@ -210,12 +252,30 @@ def get_spreadsheet_data(spreadsheet_id):
     """Get full spreadsheet data including rows."""
     spreadsheet = Spreadsheet.query.get_or_404(spreadsheet_id)
     data = spreadsheet.get_data()
+    rows = data.get('rows', [])
+    
+    # Hide duplicates: deduplicate by handle column
+    hide_duplicates = request.args.get('hide_duplicates', 'false').lower() == 'true'
+    if hide_duplicates and spreadsheet.handle_column:
+        seen_handles = set()
+        unique_rows = []
+        for row in rows:
+            handle = row.get(spreadsheet.handle_column, '').strip().lower()
+            if handle and handle not in seen_handles:
+                seen_handles.add(handle)
+                unique_rows.append(row)
+            elif not handle:
+                unique_rows.append(row)
+        rows = unique_rows
+    
     return jsonify({
         'id': spreadsheet.id,
         'name': spreadsheet.name,
         'handle_column': spreadsheet.handle_column,
         'columns': data.get('columns', []),
-        'rows': data.get('rows', [])
+        'rows': rows,
+        'total_rows': len(data.get('rows', [])),
+        'displayed_rows': len(rows)
     })
 
 
@@ -297,17 +357,9 @@ def get_group_overview(group_id):
             'total_attendance_sheets': len(group.attendance_spreadsheets)
         })
     
-    # Build attendance lookup: handle -> count of sheets they appear in
-    attendance_lookup = {}
+    # Build attendance lookup from shared handles or participant identity fields.
+    attendance_lookup = get_group_attendance_lookup(group)
     total_attendance_sheets = len(group.attendance_spreadsheets)
-    for sheet in group.attendance_spreadsheets:
-        data = sheet.get_data()
-        rows = data.get('rows', [])
-        handle_col = sheet.handle_column
-        for row in rows:
-            handle = row.get(handle_col, '').strip().lower()
-            if handle:
-                attendance_lookup[handle] = attendance_lookup.get(handle, 0) + 1
     
     # Build set of all handles in participants spreadsheet (for 📋 button)
     spreadsheet_handles = set()
@@ -355,7 +407,7 @@ def get_group_overview(group_id):
                 total_solved += result.solved_count
         
         # Add attendance tracking
-        attendance = attendance_lookup.get(handle.lower(), 0)
+        attendance = attendance_lookup.get(normalize_identity_value(handle), 0)
         participant_data['attendance'] = attendance
         participant_data['total_attendance_sheets'] = total_attendance_sheets
         
@@ -656,9 +708,10 @@ def get_contest_results(contest_id):
 
 @app.route('/api/contests/<int:contest_id>/export', methods=['GET'])
 def export_contest_results(contest_id):
-    """Export usernames as comma-separated text."""
+    """Export contest results as a handle list, JSON, or CSV."""
     contest = Contest.query.get_or_404(contest_id)
     filter_type = request.args.get('filter', 'all')  # all, passed, failed
+    export_format = request.args.get('format', 'handles')
     
     results = CachedResult.query.filter_by(contest_id=contest_id).all()
     
@@ -668,6 +721,33 @@ def export_contest_results(contest_id):
         handles = [r.handle for r in results if not r.passed]
     else:
         handles = [r.handle for r in results]
+
+    if export_format == 'json':
+        payload = {
+            'contest': contest.to_dict(),
+            'filter': filter_type,
+            'results': [r.to_dict() for r in results if r.handle in handles]
+        }
+        return Response(
+            json.dumps(payload, indent=2),
+            mimetype='application/json',
+            headers={'Content-Disposition': f'attachment; filename="{contest.name}_results.json"'}
+        )
+
+    if export_format == 'csv':
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['Handle', 'Participated', 'Solved', 'Passed', 'Rank'])
+        for result in results:
+            if result.handle in handles:
+                writer.writerow([result.handle, result.participated, result.solved_count, result.passed, result.rank])
+        csv_content = output.getvalue()
+        output.close()
+        return Response(
+            csv_content,
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename="{contest.name}_results.csv"'}
+        )
     
     return jsonify({
         'contest_name': contest.name,
@@ -780,6 +860,175 @@ def search_codeforces_contests():
         'type': c.get('type', 'CF'),
         'startTime': c.get('startTimeSeconds')
     } for c in finished])
+
+
+# ============================================================================
+# API Routes - Group CSV Export
+# ============================================================================
+
+@app.route('/api/groups/<int:group_id>/export-csv', methods=['GET'])
+def export_group_csv(group_id):
+    """Export group data as a CSV file."""
+    group = Group.query.get_or_404(group_id)
+    contests = Contest.query.filter_by(group_id=group_id).order_by(Contest.start_date.asc().nullslast()).all()
+    
+    # Build attendance lookup from shared handles or participant identity fields.
+    attendance_lookup = get_group_attendance_lookup(group)
+    total_attendance_sheets = len(group.attendance_spreadsheets)
+    
+    # Collect all unique participants
+    all_handles = set()
+    for contest in contests:
+        results = CachedResult.query.filter_by(contest_id=contest.id).all()
+        for r in results:
+            all_handles.add(r.handle.lower())
+    
+    # Build CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Header row
+    header = ['Handle', 'Total Passes', 'Total Solved', f'Attendance (/{total_attendance_sheets})', 'Points']
+    for contest in contests:
+        header.append(contest.name)
+    writer.writerow(header)
+    
+    # Data rows
+    for handle in sorted(all_handles):
+        total_passes = 0
+        total_solved = 0
+        contest_results = []
+        
+        for contest in contests:
+            result = CachedResult.query.filter_by(
+                contest_id=contest.id
+            ).filter(db.func.lower(CachedResult.handle) == handle.lower()).first()
+            
+            if result:
+                if result.passed:
+                    total_passes += 1
+                total_solved += result.solved_count
+                if not result.participated:
+                    contest_results.append('Not Entered')
+                elif result.passed:
+                    contest_results.append(f'Passed ({result.solved_count})')
+                else:
+                    contest_results.append(f'Failed ({result.solved_count})')
+            else:
+                contest_results.append('-')
+        
+        attendance = attendance_lookup.get(normalize_identity_value(handle), 0)
+        points = (total_passes * 5) + (total_solved * 1) + (attendance * 1)
+        
+        row = [handle, total_passes, total_solved, f'{attendance}/{total_attendance_sheets}', points]
+        row.extend(contest_results)
+        writer.writerow(row)
+    
+    csv_content = output.getvalue()
+    output.close()
+    
+    return Response(
+        csv_content,
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="{group.name}_export.csv"'}
+    )
+
+
+# ============================================================================
+# API Routes - Spreadsheet Statistics Export
+# ============================================================================
+
+@app.route('/api/spreadsheets/<int:spreadsheet_id>/statistics', methods=['GET'])
+def get_spreadsheet_statistics(spreadsheet_id):
+    """Get spreadsheet statistics, exportable as JSON or CSV."""
+    spreadsheet = Spreadsheet.query.get_or_404(spreadsheet_id)
+    data = spreadsheet.get_data()
+    rows = data.get('rows', [])
+    columns = data.get('columns', [])
+    export_format = request.args.get('format', 'json')  # 'json' or 'csv'
+    
+    # Build statistics
+    stats = {
+        'name': spreadsheet.name,
+        'filename': spreadsheet.filename,
+        'type': spreadsheet.spreadsheet_type,
+        'handle_column': spreadsheet.handle_column,
+        'total_rows': len(rows),
+        'total_columns': len(columns),
+        'columns': columns,
+    }
+    
+    # Column-level stats
+    col_stats = {}
+    for col in columns:
+        values = [row.get(col, '') for row in rows]
+        non_empty = [v for v in values if v and str(v).strip()]
+        unique_vals = set(str(v).strip().lower() for v in non_empty)
+        col_stats[col] = {
+            'total': len(values),
+            'non_empty': len(non_empty),
+            'empty': len(values) - len(non_empty),
+            'unique': len(unique_vals),
+            'duplicates': len(non_empty) - len(unique_vals),
+            'fill_rate': round(len(non_empty) / len(values) * 100, 1) if values else 0
+        }
+    stats['column_statistics'] = col_stats
+    
+    # Handle-specific stats
+    handle_col = spreadsheet.handle_column
+    handles = [row.get(handle_col, '').strip().lower() for row in rows if row.get(handle_col, '').strip()]
+    stats['handle_statistics'] = {
+        'total_handles': len(handles),
+        'unique_handles': len(set(handles)),
+        'duplicate_handles': len(handles) - len(set(handles))
+    }
+    
+    # Find duplicate handles
+    handle_counts = {}
+    for h in handles:
+        handle_counts[h] = handle_counts.get(h, 0) + 1
+    stats['handle_statistics']['duplicated_entries'] = [
+        {'handle': h, 'count': c} for h, c in handle_counts.items() if c > 1
+    ]
+    
+    # Usage info: which groups use this spreadsheet
+    if spreadsheet.spreadsheet_type == 'participants':
+        linked_groups = [{'id': g.id, 'name': g.name} for g in spreadsheet.groups]
+    else:
+        linked_groups = [{'id': g.id, 'name': g.name} for g in spreadsheet.attendance_groups]
+    stats['linked_groups'] = linked_groups
+    
+    # Include raw rows data for analysis
+    stats['rows'] = rows
+    
+    if export_format == 'csv':
+        # Export calculated statistics in a tabular format for analysis.
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['section', 'name', 'total', 'non_empty', 'empty', 'unique', 'duplicates', 'fill_rate', 'count'])
+        writer.writerow(['summary', 'total_rows', stats['total_rows'], '', '', '', '', '', ''])
+        writer.writerow(['summary', 'total_columns', stats['total_columns'], '', '', '', '', '', ''])
+        writer.writerow(['handles', 'total_handles', stats['handle_statistics']['total_handles'], '', '', '', '', '', ''])
+        writer.writerow(['handles', 'unique_handles', stats['handle_statistics']['unique_handles'], '', '', '', '', '', ''])
+        writer.writerow(['handles', 'duplicate_handles', stats['handle_statistics']['duplicate_handles'], '', '', '', '', '', ''])
+        for column, column_stat in col_stats.items():
+            writer.writerow([
+                'column', column, column_stat['total'], column_stat['non_empty'],
+                column_stat['empty'], column_stat['unique'], column_stat['duplicates'],
+                column_stat['fill_rate'], ''
+            ])
+        for duplicate in stats['handle_statistics']['duplicated_entries']:
+            writer.writerow(['duplicate_handle', duplicate['handle'], '', '', '', '', '', '', duplicate['count']])
+        csv_content = output.getvalue()
+        output.close()
+        return Response(
+            csv_content,
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename="{spreadsheet.name}_statistics.csv"'}
+        )
+    
+    # Default: return JSON
+    return jsonify(stats)
 
 
 if __name__ == '__main__':

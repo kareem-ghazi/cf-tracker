@@ -286,6 +286,15 @@
                     <input type="text" id="contestName" name="name" placeholder="Leave empty to auto-fetch">
                 </div>
                 <div class="form-group">
+                    <label for="contestType">Scoring Type</label>
+                    <select id="contestType" name="contest_type">
+                        <option value="contest">Contest (50 pts/solve, 20 pts/first solve, +300/+200/+100 top 3)</option>
+                        <option value="sheet">Sheet (50-74%: 150 pts, 75-99%: 300 pts, 100%: 400 pts)</option>
+                        <option value="offline_contest">Offline Contest (70 pts/solve, 50 pts/first solve, +300/+200/+100 top 3)</option>
+                    </select>
+                    <small class="form-hint">Scoring formula based on training system</small>
+                </div>
+                <div class="form-group">
                     <label for="minSolved">Minimum to Pass</label>
                     <div class="input-with-toggle">
                         <label class="checkbox-label">
@@ -321,6 +330,7 @@
         event.preventDefault();
         const cfContestId = parseInt(document.getElementById('contestId').value);
         const name = document.getElementById('contestName').value;
+        const contestType = document.getElementById('contestType').value;
         const noMinimum = document.getElementById('noMinimum').checked;
         const minSolved = noMinimum ? 0 : parseInt(document.getElementById('minSolved').value);
         const minSolvedIsPercent = noMinimum ? false : document.getElementById('minSolvedIsPercent').checked;
@@ -341,6 +351,7 @@
                 body: JSON.stringify({
                     cf_contest_id: cfContestId,
                     name: name || undefined,
+                    contest_type: contestType,
                     min_solved: minSolved,
                     min_solved_is_percent: minSolvedIsPercent,
                     participants: participants.length > 0 ? participants : undefined
@@ -371,6 +382,14 @@
                     <div class="form-group">
                         <label for="editContestName">Contest Name</label>
                         <input type="text" id="editContestName" name="name" value="${escapeHtml(contest.name)}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="editContestType">Scoring Type</label>
+                        <select id="editContestType" name="contest_type">
+                            <option value="contest" ${contest.contest_type === 'contest' ? 'selected' : ''}>Contest (50 pts/solve, 20 pts/first solve, +300/+200/+100 top 3)</option>
+                            <option value="sheet" ${contest.contest_type === 'sheet' ? 'selected' : ''}>Sheet (50-74%: 150 pts, 75-99%: 300 pts, 100%: 400 pts)</option>
+                            <option value="offline_contest" ${contest.contest_type === 'offline_contest' ? 'selected' : ''}>Offline Contest (70 pts/solve, 50 pts/first solve, +300/+200/+100 top 3)</option>
+                        </select>
                     </div>
                     <div class="form-group">
                         <label for="editMinSolved">Minimum to Pass</label>
@@ -416,6 +435,7 @@
     async function submitEditContest(event, contestId) {
         event.preventDefault();
         const name = document.getElementById('editContestName').value;
+        const contestType = document.getElementById('editContestType').value;
         const noMinimum = document.getElementById('editNoMinimum').checked;
         const minSolved = noMinimum ? 0 : parseInt(document.getElementById('editMinSolved').value);
         const minSolvedIsPercent = noMinimum ? false : document.getElementById('editMinSolvedIsPercent').checked;
@@ -432,7 +452,7 @@
             const response = await fetch(`/api/contests/${contestId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, min_solved: minSolved, min_solved_is_percent: minSolvedIsPercent, participants, lock_participants: lockParticipants })
+                body: JSON.stringify({ name, contest_type: contestType, min_solved: minSolved, min_solved_is_percent: minSolvedIsPercent, participants, lock_participants: lockParticipants })
             });
 
             if (response.ok) {
@@ -760,10 +780,12 @@
 
     let overviewData = null;
     let selectedContests = new Set();
-    let showPassesColumn = true;
-    let showSolvedColumn = true;
-    let showAttendanceColumn = true;
+    let showPassesColumn = false;
+    let showSolvedColumn = false;
+    let showAttendanceColumn = false;
     let showPointsColumn = true;
+    let showFirstSolvesColumn = true;
+    let showRankChangeColumn = true;
     let participantPhones = {};  // Cache for participant phone numbers
 
     async function loadGroupOverview() {
@@ -808,30 +830,56 @@
 
         const container = document.getElementById('overviewContainer');
         const contests = overviewData.contests.filter(c => selectedContests.has(c.id));
+        const allContestIds = new Set(contests.map(c => c.id));
         const totalAttendance = overviewData.total_attendance_sheets || 0;
 
-        // Calculate stats for each participant (using data from server)
+        // Compute per-participant stats from the currently selected contests
+        // Points come from the server (scoring.ipynb formula), first_solves accumulated
         const participantStats = overviewData.participants.map(p => {
             let passes = 0;
             let totalSolved = 0;
+            let totalFirstSolves = 0;
+            let points = 0;
             for (const contest of contests) {
                 const result = p.results[contest.id];
                 if (result && result.participated) {
                     if (result.passed) passes++;
                     totalSolved += result.solved_count || 0;
+                    totalFirstSolves += result.first_solves || 0;
+                    points += result.points || 0;
                 }
             }
             const attendance = p.attendance || 0;
-            // Points: (passes × 5) + (solved × 1) + (attendance × 1)
-            const points = (passes * 5) + (totalSolved * 1) + (attendance * 1);
-            return { ...p, passes, totalSolved, attendance, points };
+            return { ...p, passes, totalSolved, totalFirstSolves, attendance, points };
         });
 
-        // Sort by passes (desc), then total solved (desc), then attendance (desc)
+        // Compute old ranks (based on all contests except the last selected one)
+        // to show rank changes
+        const sortedContestIds = overviewData.contests
+            .filter(c => allContestIds.has(c.id))
+            .map(c => c.id);
+        const oldRanks = {};
+        if (sortedContestIds.length > 1) {
+            const priorIds = new Set(sortedContestIds.slice(0, -1));
+            const priorScores = {};
+            for (const p of overviewData.participants) {
+                let pts = 0;
+                for (const cid of priorIds) {
+                    const result = p.results[cid];
+                    if (result && result.participated) pts += result.points || 0;
+                }
+                priorScores[p.handle.toLowerCase()] = pts;
+            }
+            const sorted = Object.entries(priorScores).sort((a, b) => b[1] - a[1]);
+            sorted.forEach(([h, _], i) => { oldRanks[h] = i + 1; });
+        }
+
+        // Sort by points desc, then first_solves desc, then handle
         participantStats.sort((a, b) => {
+            if (b.points !== a.points) return b.points - a.points;
+            if (b.totalFirstSolves !== a.totalFirstSolves) return b.totalFirstSolves - a.totalFirstSolves;
             if (b.passes !== a.passes) return b.passes - a.passes;
-            if (b.totalSolved !== a.totalSolved) return b.totalSolved - a.totalSolved;
-            return b.attendance - a.attendance;
+            return a.handle.toLowerCase().localeCompare(b.handle.toLowerCase());
         });
 
         // Build filter UI
@@ -853,6 +901,15 @@
                 <div class="column-toggles" style="margin-top: 0.5rem;">
                     <label class="filter-label">Show Columns:</label>
                     <label class="checkbox-label" style="margin-left: 0.5rem;">
+                        <input type="checkbox" ${showRankChangeColumn ? 'checked' : ''} onchange="toggleRankChangeColumn(this.checked)"> Rank Changes
+                    </label>
+                    <label class="checkbox-label" style="margin-left: 0.5rem;">
+                        <input type="checkbox" ${showPointsColumn ? 'checked' : ''} onchange="togglePointsColumn(this.checked)"> Points
+                    </label>
+                    <label class="checkbox-label" style="margin-left: 0.5rem;">
+                        <input type="checkbox" ${showFirstSolvesColumn ? 'checked' : ''} onchange="toggleFirstSolvesColumn(this.checked)"> First Solves
+                    </label>
+                    <label class="checkbox-label" style="margin-left: 0.5rem;">
                         <input type="checkbox" ${showPassesColumn ? 'checked' : ''} onchange="togglePassesColumn(this.checked)"> Passes
                     </label>
                     <label class="checkbox-label" style="margin-left: 0.5rem;">
@@ -861,9 +918,6 @@
                     <label class="checkbox-label" style="margin-left: 0.5rem;">
                         <input type="checkbox" ${showAttendanceColumn ? 'checked' : ''} onchange="toggleAttendanceColumn(this.checked)"> Attendance
                     </label>
-                    <label class="checkbox-label" style="margin-left: 0.5rem;">
-                        <input type="checkbox" ${showPointsColumn ? 'checked' : ''} onchange="togglePointsColumn(this.checked)"> Points
-                    </label>
                 </div>
             </div>
             <div class="overview-table-container">
@@ -871,11 +925,13 @@
                     <thead>
                         <tr>
                             <th class="rank-col">#</th>
+                            ${showRankChangeColumn ? '<th class="stats-col" title="Change in rank compared to standings before the last contest">±</th>' : ''}
                             <th class="handle-col">Handle</th>
+                            ${showPointsColumn ? '<th class="stats-col" title="Total points based on scoring.ipynb formula">Points</th>' : ''}
+                            ${showFirstSolvesColumn ? '<th class="stats-col" title="Total problems first-solved across all contests">⚡ First Solves</th>' : ''}
                             ${showPassesColumn ? '<th class="stats-col">Passes</th>' : ''}
                             ${showSolvedColumn ? '<th class="stats-col">Solved</th>' : ''}
                             ${showAttendanceColumn ? '<th class="stats-col">Attendance</th>' : ''}
-                            ${showPointsColumn ? '<th class="stats-col" title="Formula: (Passes × 5) + (Solved × 1) + (Attendance × 1)">Points</th>' : ''}
                             ${contests.map(c => `
                                 <th class="contest-col" title="${escapeHtml(c.name)}">
                                     <div class="contest-header">
@@ -896,21 +952,42 @@
             else if (rank === 2) { rowClass = 'rank-silver'; }
             else if (rank === 3) { rowClass = 'rank-bronze'; }
 
+            // Compute rank change display
+            let rankChangeTd = '';
+            if (showRankChangeColumn) {
+                const hLow = participant.handle.toLowerCase();
+                let rcText = '-';
+                let rcClass = '';
+                if (sortedContestIds.length > 1) {
+                    if (hLow in oldRanks) {
+                        const diff = oldRanks[hLow] - rank;
+                        rcText = diff > 0 ? `+${diff}` : `${diff}`;
+                        rcClass = diff > 0 ? 'rank-up' : (diff < 0 ? 'rank-down' : 'rank-same');
+                    } else {
+                        rcText = 'NEW';
+                        rcClass = 'rank-new';
+                    }
+                }
+                rankChangeTd = `<td class="stats-col rank-change-cell ${rcClass}">${rcText}</td>`;
+            }
+
             // Only show 📋 if participant is in spreadsheet
             const showSpreadsheetBtn = currentGroup.spreadsheet && participant.in_spreadsheet;
 
             html += `<tr class="${rowClass}">
                 <td class="rank-col">${rank}</td>
+                ${rankChangeTd}
                 <td class="handle-col">
                     <a href="javascript:void(0)" onclick="openHandleAction('${participant.handle}')" class="handle-link">
                         ${escapeHtml(participant.handle)}
                     </a>
                     ${showSpreadsheetBtn ? `<button class="spreadsheet-link" onclick="viewParticipantData('${participant.handle}')" title="View participant data">📋</button>` : ''}
                 </td>
+                ${showPointsColumn ? `<td class="stats-col">${participant.points}</td>` : ''}
+                ${showFirstSolvesColumn ? `<td class="stats-col">${participant.totalFirstSolves}</td>` : ''}
                 ${showPassesColumn ? `<td class="stats-col">${participant.passes}</td>` : ''}
                 ${showSolvedColumn ? `<td class="stats-col">${participant.totalSolved}</td>` : ''}
-                ${showAttendanceColumn ? `<td class="stats-col">${participant.attendance}/${totalAttendance}</td>` : ''}
-                ${showPointsColumn ? `<td class="stats-col">${participant.points}</td>` : ''}`;
+                ${showAttendanceColumn ? `<td class="stats-col">${participant.attendance}/${totalAttendance}</td>` : ''}`;
 
             for (const contest of contests) {
                 const result = participant.results[contest.id];
@@ -979,6 +1056,16 @@
 
     function togglePointsColumn(show) {
         showPointsColumn = show;
+        renderOverview();
+    }
+
+    function toggleFirstSolvesColumn(show) {
+        showFirstSolvesColumn = show;
+        renderOverview();
+    }
+
+    function toggleRankChangeColumn(show) {
+        showRankChangeColumn = show;
         renderOverview();
     }
 

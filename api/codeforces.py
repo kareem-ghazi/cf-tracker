@@ -193,6 +193,52 @@ class CodeforcesAPI:
                     }
         
         return default_result  # User not found in standings
+    
+    def get_contest_status(self, contest_id, count=None):
+        """Get contest submissions (status).
+        
+        Args:
+            contest_id: Codeforces contest ID.
+            count: Number of submissions to return (optional).
+        
+        Returns:
+            Contest status data (submissions) or error dict.
+        """
+        params = {'contestId': contest_id}
+        if count:
+            params['count'] = count
+        return self._make_request('contest.status', params)
+    
+    def get_first_solvers(self, status_result, problems):
+        """Find the earliest accepted solver for each problem.
+        
+        Args:
+            status_result: Result from get_contest_status.
+            problems: List of problem dicts or problem index strings.
+            
+        Returns:
+            Dict mapping problem_index -> solver_handle.
+        """
+        if not status_result or not status_result.get('success'):
+            return {}
+        
+        submissions = status_result.get('result', [])
+        prob_indices = [p['index'] if isinstance(p, dict) else str(p) for p in problems]
+        
+        first_solvers = {}
+        for prob_idx in prob_indices:
+            ac_submissions = [
+                sub for sub in submissions
+                if sub.get('verdict') == 'OK'
+                and sub.get('problem', {}).get('index') == prob_idx
+            ]
+            if ac_submissions:
+                first_sub = min(ac_submissions, key=lambda x: x.get('creationTimeSeconds', float('inf')))
+                author = first_sub.get('author', {})
+                members = author.get('members', [])
+                if members:
+                    first_solvers[prob_idx] = members[0].get('handle')
+        return first_solvers
 
 
 # Singleton instance

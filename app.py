@@ -87,6 +87,116 @@ def get_group_attendance_lookup(group):
             attendance_lookup[handle] = attendance_lookup.get(handle, 0) + 1
     return attendance_lookup
 
+
+def compute_contest_scores(contest_type, participants_data, total_problems):
+    """Calculate scores according to scoring.ipynb.
+    
+    participants_data: list of dicts with:
+      - handle
+      - solved_count
+      - first_solves
+      - participated (bool)
+      - rank (int, 0 if unranked)
+    
+    Returns:
+      dict mapping handle.lower() -> points (float)
+    """
+    scores = {}
+    ctype = (contest_type or 'contest').lower()
+    
+    if ctype == 'sheet':
+        for p in participants_data:
+            if not p.get('participated') or total_problems <= 0:
+                scores[p['handle'].lower()] = 0.0
+                continue
+            ratio = p.get('solved_count', 0) / total_problems
+            if 0.5 <= ratio < 0.75:
+                scores[p['handle'].lower()] = 150.0
+            elif 0.75 <= ratio < 1.0:
+                scores[p['handle'].lower()] = 300.0
+            elif ratio >= 1.0:
+                scores[p['handle'].lower()] = 400.0
+            else:
+                scores[p['handle'].lower()] = 0.0
+        return scores
+
+    # contest or offline_contest
+    mult_solved = 70.0 if ctype == 'offline_contest' else 50.0
+    mult_fastest = 50.0 if ctype == 'offline_contest' else 20.0
+    
+    for p in participants_data:
+        if p.get('participated'):
+            scores[p['handle'].lower()] = (p.get('solved_count', 0) * mult_solved) + (p.get('first_solves', 0) * mult_fastest)
+        else:
+            scores[p['handle'].lower()] = 0.0
+            
+    # Top 3 Rank Bonuses
+    participating = [p for p in participants_data if p.get('participated') and p.get('rank', 0) > 0]
+    participating.sort(key=lambda x: (x['rank'], -x.get('solved_count', 0)))
+    
+    if len(participating) >= 1:
+        scores[participating[0]['handle'].lower()] += 300.0
+    if len(participating) >= 2:
+        scores[participating[1]['handle'].lower()] += 200.0
+    if len(participating) >= 3:
+        scores[participating[2]['handle'].lower()] += 100.0
+        
+    return scores
+
+
+def get_contest_rank_changes(contest):
+    """Calculate rank change for each participant in a contest compared to prior group contests (add_scores.ipynb)."""
+    if not contest.group_id:
+        return {}
+    
+    group_contests = Contest.query.filter_by(group_id=contest.group_id).order_by(
+        Contest.start_date.asc().nullslast(), Contest.id.asc()
+    ).all()
+    
+    contest_ids = [c.id for c in group_contests]
+    if contest.id not in contest_ids:
+        return {}
+    
+    curr_idx = contest_ids.index(contest.id)
+    if curr_idx == 0:
+        return {}
+    
+    prior_contests = group_contests[:curr_idx]
+    current_and_prior = group_contests[:curr_idx + 1]
+    
+    # Cumulative scores from prior contests
+    prior_scores = {}
+    for c in prior_contests:
+        for r in c.results:
+            if r.participated:
+                h = r.handle.lower()
+                prior_scores[h] = prior_scores.get(h, 0.0) + (r.points or 0.0)
+                
+    prior_sorted = sorted(prior_scores.items(), key=lambda x: -x[1])
+    old_ranks = {h: idx + 1 for idx, (h, _) in enumerate(prior_sorted)}
+    
+    # Cumulative scores including current contest
+    new_scores = {}
+    for c in current_and_prior:
+        for r in c.results:
+            if r.participated:
+                h = r.handle.lower()
+                new_scores[h] = new_scores.get(h, 0.0) + (r.points or 0.0)
+                
+    new_sorted = sorted(new_scores.items(), key=lambda x: -x[1])
+    new_ranks = {h: idx + 1 for idx, (h, _) in enumerate(new_sorted)}
+    
+    rank_changes = {}
+    for h, new_r in new_ranks.items():
+        if h in old_ranks:
+            diff = old_ranks[h] - new_r
+            rank_changes[h] = f"+{diff}" if diff > 0 else str(diff)
+        else:
+            rank_changes[h] = "NEW"
+            
+    return rank_changes
+
+
 @app.route('/api/groups', methods=['GET'])
 def get_groups():
     """Get all groups."""
@@ -384,6 +494,8 @@ def get_group_overview(group_id):
     for handle in sorted(all_handles, key=str.lower):
         total_passes = 0
         total_solved = 0
+        total_first_solves = 0
+        total_points = 0.0
         participant_data = {
             'handle': handle,
             'results': {},
@@ -396,35 +508,43 @@ def get_group_overview(group_id):
             ).filter(db.func.lower(CachedResult.handle) == handle.lower()).first()
             
             if result:
+                pt = result.points or 0.0
+                fs = result.first_solves or 0
                 participant_data['results'][contest.id] = {
                     'solved_count': result.solved_count,
                     'passed': result.passed,
                     'participated': result.participated,
-                    'rank': result.rank
+                    'rank': result.rank,
+                    'first_solves': fs,
+                    'points': int(pt) if pt == int(pt) else pt
                 }
                 if result.passed:
                     total_passes += 1
                 total_solved += result.solved_count
+                total_first_solves += fs
+                total_points += pt
         
         # Add attendance tracking
         attendance = attendance_lookup.get(normalize_identity_value(handle), 0)
         participant_data['attendance'] = attendance
         participant_data['total_attendance_sheets'] = total_attendance_sheets
         
-        # Calculate points: (passes × 5) + (solved × 1) + (attendance × 1)
-        points = (total_passes * 5) + (total_solved * 1) + (attendance * 1)
-        participant_data['points'] = points
+        # Calculate points: exact sum of contest points according to add_scores.ipynb
+        pt_val = int(total_points) if total_points == int(total_points) else total_points
+        participant_data['points'] = pt_val
+        participant_data['total_first_solves'] = total_first_solves
         participant_data['total_passes'] = total_passes
         participant_data['total_solved'] = total_solved
         
         participants.append(participant_data)
     
-    # Build contest data with min solved info
+    # Build contest data with min solved info & contest_type
     contest_data = []
     for contest in contests:
         contest_data.append({
             'id': contest.id,
             'name': contest.name,
+            'contest_type': contest.contest_type or 'contest',
             'total_problems': contest.total_problems,
             'min_solved': contest.min_solved,
             'min_solved_is_percent': contest.min_solved_is_percent,
@@ -503,10 +623,22 @@ def add_contest(group_id):
     if start_time_seconds:
         start_date = datetime.fromtimestamp(start_time_seconds, tz=timezone.utc)
     
+    # Determine contest type
+    contest_type = data.get('contest_type')
+    if not contest_type:
+        c_low = contest_name.lower()
+        if 'offline' in c_low:
+            contest_type = 'offline_contest'
+        elif 'sheet' in c_low:
+            contest_type = 'sheet'
+        else:
+            contest_type = 'contest'
+    
     contest = Contest(
         group_id=group_id,
         cf_contest_id=cf_contest_id,
         name=contest_name,
+        contest_type=contest_type,
         min_solved=data.get('min_solved', 1),
         min_solved_is_percent=data.get('min_solved_is_percent', False),
         total_problems=total_problems,
@@ -534,6 +666,22 @@ def update_contest(contest_id):
     
     if data.get('name'):
         contest.name = data['name']
+    if 'contest_type' in data and data['contest_type']:
+        old_type = contest.contest_type
+        contest.contest_type = data['contest_type']
+        if old_type != contest.contest_type:
+            # Recompute points for all cached results
+            results = CachedResult.query.filter_by(contest_id=contest_id).all()
+            participants_info = [{
+                'handle': r.handle,
+                'solved_count': r.solved_count,
+                'first_solves': r.first_solves or 0,
+                'participated': r.participated,
+                'rank': r.rank
+            } for r in results]
+            scores = compute_contest_scores(contest.contest_type, participants_info, contest.total_problems)
+            for r in results:
+                r.points = scores.get(r.handle.lower(), 0.0)
     if 'min_solved' in data:
         contest.min_solved = data['min_solved']
     if 'min_solved_is_percent' in data:
@@ -609,6 +757,41 @@ def refresh_contest_results(contest_id):
     # Get required solved count (handles percentage)
     required_solved = contest.get_required_solved()
     
+    # Fetch first solvers if contest or offline_contest
+    first_solvers = {}
+    ctype = contest.contest_type or 'contest'
+    if ctype in ['contest', 'offline_contest']:
+        try:
+            status_res = cf_api.get_contest_status(contest.cf_contest_id)
+            first_solvers = cf_api.get_first_solvers(status_res, problems)
+        except Exception as e:
+            app.logger.warning(f"Error fetching status for contest {contest.cf_contest_id}: {e}")
+            first_solvers = {}
+            
+    first_solve_counts = {}
+    for prob_idx, solver in first_solvers.items():
+        if solver:
+            h_low = solver.lower()
+            first_solve_counts[h_low] = first_solve_counts.get(h_low, 0) + 1
+            
+    # Collect participant info for score calculation
+    participants_info = []
+    for handle in participants:
+        participant_data = cf_api.get_participant_data(standings, handle)
+        solved_count = participant_data['solved_count']
+        participated = participant_data['participated']
+        rank = participant_data['rank']
+        fs = first_solve_counts.get(handle.lower(), 0) if ctype in ['contest', 'offline_contest'] else 0
+        participants_info.append({
+            'handle': handle,
+            'solved_count': solved_count,
+            'participated': participated,
+            'rank': rank,
+            'first_solves': fs
+        })
+        
+    scores = compute_contest_scores(contest.contest_type, participants_info, contest.total_problems)
+    
     # Process results for each participant
     results = []
     now = datetime.now(timezone.utc)
@@ -616,11 +799,13 @@ def refresh_contest_results(contest_id):
     failed_count = 0
     not_participated_count = 0
     
-    for handle in participants:
-        participant_data = cf_api.get_participant_data(standings, handle)
-        solved_count = participant_data['solved_count']
-        participated = participant_data['participated']
-        rank = participant_data['rank']
+    for p in participants_info:
+        handle = p['handle']
+        solved_count = p['solved_count']
+        participated = p['participated']
+        rank = p['rank']
+        fs = p['first_solves']
+        pt = scores.get(handle.lower(), 0.0)
         
         # Determine pass/fail (only if participated)
         if participated:
@@ -640,6 +825,8 @@ def refresh_contest_results(contest_id):
             passed=passed,
             participated=participated,
             rank=rank,
+            first_solves=fs,
+            points=pt,
             cached_at=now
         )
         db.session.add(result)
@@ -686,6 +873,7 @@ def get_contest_results(contest_id):
     """Get cached results for a contest."""
     contest = Contest.query.get_or_404(contest_id)
     results = CachedResult.query.filter_by(contest_id=contest_id).all()
+    rank_changes = get_contest_rank_changes(contest)
     
     # Calculate summary
     participated_results = [r for r in results if r.participated]
@@ -693,9 +881,15 @@ def get_contest_results(contest_id):
     not_participated_count = sum(1 for r in results if not r.participated)
     failed_count = len(participated_results) - passed_count
     
+    formatted_results = []
+    for r in results:
+        d = r.to_dict()
+        d['rank_change'] = rank_changes.get(r.handle.lower(), 'NEW' if r.participated else '-')
+        formatted_results.append(d)
+    
     return jsonify({
         'contest': contest.to_dict(),
-        'results': [r.to_dict() for r in results],
+        'results': formatted_results,
         'summary': {
             'total': len(results),
             'passed': passed_count,
@@ -714,6 +908,7 @@ def export_contest_results(contest_id):
     export_format = request.args.get('format', 'handles')
     
     results = CachedResult.query.filter_by(contest_id=contest_id).all()
+    rank_changes = get_contest_rank_changes(contest)
     
     if filter_type == 'passed':
         handles = [r.handle for r in results if r.passed]
@@ -723,10 +918,16 @@ def export_contest_results(contest_id):
         handles = [r.handle for r in results]
 
     if export_format == 'json':
+        formatted_results = []
+        for r in results:
+            if r.handle in handles:
+                d = r.to_dict()
+                d['rank_change'] = rank_changes.get(r.handle.lower(), 'NEW' if r.participated else '-')
+                formatted_results.append(d)
         payload = {
             'contest': contest.to_dict(),
             'filter': filter_type,
-            'results': [r.to_dict() for r in results if r.handle in handles]
+            'results': formatted_results
         }
         return Response(
             json.dumps(payload, indent=2),
@@ -737,10 +938,20 @@ def export_contest_results(contest_id):
     if export_format == 'csv':
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['Handle', 'Participated', 'Solved', 'Passed', 'Rank'])
+        writer.writerow(['Rank', 'Rank Change', 'Handle', 'Points', 'First Solves', 'Solved', 'Passed'])
         for result in results:
             if result.handle in handles:
-                writer.writerow([result.handle, result.participated, result.solved_count, result.passed, result.rank])
+                rc = rank_changes.get(result.handle.lower(), 'NEW' if result.participated else '-')
+                pt = int(result.points) if result.points == int(result.points) else (result.points or 0)
+                writer.writerow([
+                    result.rank if result.participated and result.rank > 0 else '-',
+                    rc,
+                    result.handle,
+                    pt,
+                    result.first_solves or 0,
+                    result.solved_count if result.participated else '-',
+                    'Passed' if result.passed else ('Failed' if result.participated else 'Not Entered')
+                ])
         csv_content = output.getvalue()
         output.close()
         return Response(
@@ -778,20 +989,29 @@ def get_contest_standings(contest_id):
     """Get contest results ordered by rank (standings view)."""
     contest = Contest.query.get_or_404(contest_id)
     results = CachedResult.query.filter_by(contest_id=contest_id).all()
+    rank_changes = get_contest_rank_changes(contest)
     
     # Separate participated and not participated
     participated = [r for r in results if r.participated]
     not_participated = [r for r in results if not r.participated]
+
+    print(not_participated)
     
-    # Sort participated by rank (0 means no rank, put at end)
-    participated.sort(key=lambda r: (r.rank == 0, r.rank, -r.solved_count))
+    # Sort participated by rank (0 means no rank, put at end), then points desc
+    participated.sort(key=lambda r: (r.rank == 0, r.rank, -(r.points or 0.0), -r.solved_count))
     
     # Combine: participated first (sorted by rank), then not participated
     ordered_results = participated + not_participated
     
+    standings_list = []
+    for r in ordered_results:
+        d = r.to_dict()
+        d['rank_change'] = rank_changes.get(r.handle.lower(), 'NEW' if r.participated else '-')
+        standings_list.append(d)
+    
     return jsonify({
         'contest': contest.to_dict(),
-        'standings': [r.to_dict() for r in ordered_results],
+        'standings': standings_list,
         'summary': {
             'total': len(results),
             'participated': len(participated),
@@ -870,7 +1090,7 @@ def search_codeforces_contests():
 def export_group_csv(group_id):
     """Export group data as a CSV file."""
     group = Group.query.get_or_404(group_id)
-    contests = Contest.query.filter_by(group_id=group_id).order_by(Contest.start_date.asc().nullslast()).all()
+    contests = Contest.query.filter_by(group_id=group_id).order_by(Contest.start_date.asc().nullslast(), Contest.id.asc()).all()
     
     # Build attendance lookup from shared handles or participant identity fields.
     attendance_lookup = get_group_attendance_lookup(group)
@@ -883,21 +1103,27 @@ def export_group_csv(group_id):
         for r in results:
             all_handles.add(r.handle.lower())
     
-    # Build CSV
-    output = io.StringIO()
-    writer = csv.writer(output)
+    # Calculate old ranks from contests prior to the latest contest (add_scores.ipynb)
+    old_ranks = {}
+    if len(contests) > 1:
+        prior_contests = contests[:-1]
+        prior_scores = {}
+        for c in prior_contests:
+            for r in c.results:
+                if r.participated:
+                    h = r.handle.lower()
+                    prior_scores[h] = prior_scores.get(h, 0.0) + (r.points or 0.0)
+        prior_sorted = sorted(prior_scores.items(), key=lambda x: -x[1])
+        old_ranks = {h: idx + 1 for idx, (h, _) in enumerate(prior_sorted)}
     
-    # Header row
-    header = ['Handle', 'Total Passes', 'Total Solved', f'Attendance (/{total_attendance_sheets})', 'Points']
-    for contest in contests:
-        header.append(contest.name)
-    writer.writerow(header)
-    
-    # Data rows
-    for handle in sorted(all_handles):
+    participant_rows = []
+    for handle in all_handles:
         total_passes = 0
         total_solved = 0
+        total_first_solves = 0
+        total_points = 0.0
         contest_results = []
+        actual_handle = handle
         
         for contest in contests:
             result = CachedResult.query.filter_by(
@@ -905,23 +1131,65 @@ def export_group_csv(group_id):
             ).filter(db.func.lower(CachedResult.handle) == handle.lower()).first()
             
             if result:
+                actual_handle = result.handle
                 if result.passed:
                     total_passes += 1
                 total_solved += result.solved_count
+                total_first_solves += (result.first_solves or 0)
+                total_points += (result.points or 0.0)
                 if not result.participated:
                     contest_results.append('Not Entered')
-                elif result.passed:
-                    contest_results.append(f'Passed ({result.solved_count})')
                 else:
-                    contest_results.append(f'Failed ({result.solved_count})')
+                    pt_str = int(result.points) if result.points == int(result.points) else result.points
+                    contest_results.append(f'{pt_str} pts ({result.solved_count} solved)')
             else:
                 contest_results.append('-')
-        
+                
         attendance = attendance_lookup.get(normalize_identity_value(handle), 0)
-        points = (total_passes * 5) + (total_solved * 1) + (attendance * 1)
+        pt_val = int(total_points) if total_points == int(total_points) else total_points
         
-        row = [handle, total_passes, total_solved, f'{attendance}/{total_attendance_sheets}', points]
-        row.extend(contest_results)
+        participant_rows.append({
+            'handle': actual_handle,
+            'points': pt_val,
+            'first_solves': total_first_solves,
+            'total_solved': total_solved,
+            'total_passes': total_passes,
+            'attendance': attendance,
+            'contest_results': contest_results
+        })
+        
+    # Sort by Points descending, tie break by first_solves, total_solved
+    participant_rows.sort(key=lambda x: (-x['points'], -x['first_solves'], -x['total_solved'], x['handle'].lower()))
+    
+    # Header row
+    header = ['Rank', 'Rank Change', 'Handle', 'Points', 'First Solves', 'Total Solved', 'Total Passes', f'Attendance (/{total_attendance_sheets})']
+    for contest in contests:
+        header.append(contest.name)
+        
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(header)
+    
+    for idx, p in enumerate(participant_rows):
+        rank = idx + 1
+        h_low = p['handle'].lower()
+        if h_low in old_ranks:
+            diff = old_ranks[h_low] - rank
+            rank_change = f"+{diff}" if diff > 0 else str(diff)
+        else:
+            rank_change = "NEW"
+            
+        row = [
+            rank,
+            rank_change,
+            p['handle'],
+            p['points'],
+            p['first_solves'],
+            p['total_solved'],
+            p['total_passes'],
+            f"{p['attendance']}/{total_attendance_sheets}"
+        ]
+        row.extend(p['contest_results'])
         writer.writerow(row)
     
     csv_content = output.getvalue()

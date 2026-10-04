@@ -141,14 +141,17 @@
                 <thead>
                     <tr>
                         <th>Rank</th>
+                        <th title="Change vs. prior contests standings">±</th>
                         <th>Handle</th>
+                        <th title="Total points from scoring formula">Points</th>
+                        <th title="Number of problems first-solved">⚡ First Solves</th>
                         <th>Solved</th>
                         <th>Status</th>
                     </tr>
                 </thead>
                 <tbody id="standingsTableBody">
                     <tr>
-                        <td colspan="4" class="loading-cell">Loading standings...</td>
+                        <td colspan="7" class="loading-cell">Loading standings...</td>
                     </tr>
                 </tbody>
             </table>
@@ -378,15 +381,33 @@
                     statusBadge = '<span class="status-badge status-failed">❌ Did Not Pass</span>';
                 }
 
+                // Rank change display
+                const rc = result.rank_change || '-';
+                let rcClass = '';
+                if (rc !== '-' && rc !== 'NEW') {
+                    const num = parseInt(rc);
+                    rcClass = num > 0 ? 'rank-up' : (num < 0 ? 'rank-down' : 'rank-same');
+                } else if (rc === 'NEW') {
+                    rcClass = 'rank-new';
+                }
+
+                const pointsDisplay = result.participated
+                    ? (Number.isInteger(result.points) ? result.points : (result.points || 0))
+                    : '-';
+                const firstSolvesDisplay = result.participated ? (result.first_solves || 0) : '-';
+
                 return `
                     <tr class="${rowClass}">
                         <td>${rankDisplay}</td>
+                        <td class="rank-change-cell ${rcClass}">${rc}</td>
                         <td>
                             <a href="javascript:void(0)" onclick="openHandleAction('${result.handle}')" class="handle-link">
                                 ${escapeHtml(result.handle)}
                             </a>
                             ${spreadsheetId ? `<button class="spreadsheet-link" onclick="viewParticipantData('${result.handle}')" title="View participant data">📋</button>` : ''}
                         </td>
+                        <td>${pointsDisplay}</td>
+                        <td>${firstSolvesDisplay}</td>
                         <td>${result.participated ? result.solved_count : '-'}</td>
                         <td>${statusBadge}</td>
                     </tr>

@@ -130,6 +130,7 @@ class Contest(db.Model):
     total_problems = db.Column(db.Integer, default=0)  # Total problems in contest (for percentage calc)
     start_date = db.Column(db.DateTime, nullable=True)  # When the contest started on Codeforces
     last_refreshed = db.Column(db.DateTime, nullable=True)  # Last time results were fetched
+    contest_type = db.Column(db.String(20), default='contest')  # 'contest', 'sheet', or 'offline_contest'
     
     # Relationships
     results = db.relationship('CachedResult', backref='contest', lazy=True, cascade='all, delete-orphan')
@@ -158,6 +159,7 @@ class Contest(db.Model):
             'group_id': self.group_id,
             'cf_contest_id': self.cf_contest_id,
             'name': self.name,
+            'contest_type': self.contest_type or 'contest',
             'min_solved': self.min_solved,
             'min_solved_is_percent': self.min_solved_is_percent,
             'total_problems': self.total_problems,
@@ -182,10 +184,15 @@ class CachedResult(db.Model):
     passed = db.Column(db.Boolean, default=False)
     participated = db.Column(db.Boolean, default=True)  # False if never entered contest
     rank = db.Column(db.Integer, default=0)  # Contest rank (0 if not participated)
+    first_solves = db.Column(db.Integer, default=0)  # Number of first accepted solves in contest
+    points = db.Column(db.Float, default=0.0)  # Score / Points for this contest
     cached_at = db.Column(db.DateTime, default=utc_now)
     
     def to_dict(self):
         """Convert to dictionary for JSON serialization."""
+        points_val = self.points or 0.0
+        if points_val == int(points_val):
+            points_val = int(points_val)
         return {
             'id': self.id,
             'contest_id': self.contest_id,
@@ -194,6 +201,8 @@ class CachedResult(db.Model):
             'passed': self.passed,
             'participated': self.participated,
             'rank': self.rank,
+            'first_solves': self.first_solves or 0,
+            'points': points_val,
             'cached_at': self.cached_at.isoformat() if self.cached_at else utc_now().isoformat()
         }
 

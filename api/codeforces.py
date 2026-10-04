@@ -44,7 +44,7 @@ class CodeforcesAPI:
             time.sleep(Config.CF_REQUEST_DELAY - elapsed)
         self.last_request_time = time.time()
     
-    def _make_request(self, method, params=None, authenticate=True):
+    def _make_request(self, method, params=None):
         """Make a request to the Codeforces API."""
         self._rate_limit()
         
@@ -52,7 +52,7 @@ class CodeforcesAPI:
             params = {}
         
         # Add authentication if available
-        if authenticate and self.api_key and self.api_secret:
+        if self.api_key and self.api_secret:
             params['apiKey'] = self.api_key
             params['time'] = int(time.time())
             api_sig = self._generate_api_sig(method, params)
@@ -87,30 +87,27 @@ class CodeforcesAPI:
         params = {'gym': str(gym).lower()}
         return self._make_request('contest.list', params)
     
-    def get_contest_standings(self, contest_id, handles=None, show_unofficial=None):
+    def get_contest_standings(self, contest_id, handles=None, show_unofficial=True):
         """Get contest standings for specific handles.
         
         Args:
             contest_id: Codeforces contest ID.
             handles: List of handles to filter (optional).
-            show_unofficial: Whether to include unofficial participants (optional).
+            show_unofficial: Whether to include unofficial participants.
         
         Returns:
             Contest standings data or error dict.
         """
-        params = {'contestId': contest_id}
+        params = {
+            'contestId': contest_id,
+            'showUnofficial': str(show_unofficial).lower()
+        }
         
         if handles:
             # Codeforces API accepts semicolon-separated handles
             params['handles'] = ';'.join(handles)
         
-        if show_unofficial is not None:
-            params['showUnofficial'] = str(show_unofficial).lower()
-
-        # Non-gym standings for non-admin users require an anonymous request
-        # with contestId as the only parameter.
-        anonymous = handles is None and show_unofficial is None
-        return self._make_request('contest.standings', params, authenticate=not anonymous)
+        return self._make_request('contest.standings', params)
     
     def get_user_info(self, handles):
         """Get information about users.
